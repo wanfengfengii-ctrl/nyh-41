@@ -636,6 +636,117 @@ def build_baseline_from_sample(sample_id: int, remark: str = "") -> Optional[Pap
     )
 
 
+def build_aggregated_baseline(paper_type: str, remark: str = "") -> Optional[PaperTypeBaseline]:
+    baseline_rows = db.get_baselines_by_paper_type(paper_type)
+    if not baseline_rows:
+        return None
+
+    valid_samples = []
+    for bs in baseline_rows:
+        rows = db.get_measurements_by_sample(bs["id"])
+        if len(rows) >= 3:
+            valid_samples.append((bs, rows))
+
+    if not valid_samples:
+        return None
+
+    if len(valid_samples) == 1:
+        return build_baseline_from_sample(valid_samples[0][0]["id"], remark)
+
+    all_slopes = []
+    all_radii = []
+    all_roughness = []
+    ref_times = None
+    ref_radii = None
+    ref_rough = None
+    primary_sample_id = valid_samples[0][0]["id"]
+
+    for bs, rows in valid_samples:
+        times = [float(r["adsorb_time"]) for r in rows]
+        radii = [float(r["radius"]) for r in rows]
+        rough = [float(r["roughness"]) for r in rows]
+        s_idx = sorted(range(len(times)), key=lambda i: times[i])
+        times = [times[i] for i in s_idx]
+        radii = [radii[i] for i in s_idx]
+        rough = [rough[i] for i in s_idx]
+
+        all_slopes.append(_fit_slope(times, radii))
+        all_radii.append(statistics.mean(radii))
+        all_roughness.append(statistics.mean(rough))
+
+        if ref_times is None:
+            ref_times = times
+            ref_radii = radii
+            ref_rough = rough
+
+    avg_slope = statistics.mean(all_slopes)
+    avg_radius = statistics.mean(all_radii)
+    avg_rough = statistics.mean(all_roughness)
+
+    agg_times = ref_times
+    agg_radii = ref_radii
+    agg_rough = ref_rough
+
+    if len(valid_samples) > 1 and ref_times:
+        all_measurements_map = db.get_measurements_by_samples(
+            [bs["id"] for bs, _ in valid_samples]
+        )
+
+        interp_radii_sum = list(ref_radii)
+        interp_rough_sum = list(ref_rough)
+        interp_count = [1] * len(agg_times)
+
+        for bs, _ in valid_samples[1:]:
+            bs_rows = all_measurements_map.get(bs["id"], [])
+            if len(bs_rows) < 3:
+                continue
+            bs_times = [float(r["adsorb_time"]) for r in bs_rows]
+            bs_radii = [float(r["radius"]) for r in bs_rows]
+            bs_rough = [float(r["roughness"]) for r in bs_rows]
+
+            for i, t in enumerate(agg_times):
+                interp_r = _interpolate_baseline_value(bs_times, bs_radii, t)
+                interp_ro = _interpolate_baseline_value(bs_times, bs_rough, t)
+                if interp_r is not None:
+                    interp_radii_sum[i] += interp_r
+                    interp_count[i] += 1
+                    if interp_ro is not None:
+                        interp_rough_sum[i] += interp_ro
+
+        agg_radii = [interp_radii_sum[i] / interp_count[i] for i in range(len(agg_times))]
+        agg_rough = [interp_rough_sum[i] / interp_count[i] for i in range(len(agg_times))]
+
+    times_json = json.dumps(agg_times, ensure_ascii=False)
+    radii_json = json.dumps(agg_radii, ensure_ascii=False)
+    rough_json = json.dumps(agg_rough, ensure_ascii=False)
+
+    existing = db.get_baseline_template_by_paper(paper_type)
+    if existing:
+        db.update_baseline_template(
+            existing["id"], primary_sample_id, avg_slope, avg_radius, avg_rough,
+            times_json, radii_json, rough_json, remark
+        )
+    else:
+        db.create_baseline_template(
+            paper_type, primary_sample_id, avg_slope, avg_radius, avg_rough,
+            times_json, radii_json, rough_json, remark
+        )
+
+    sample_ids = [bs["id"] for bs, _ in valid_samples]
+    return PaperTypeBaseline(
+        paper_type=paper_type,
+        template_id=existing["id"] if existing else None,
+        baseline_sample_id=primary_sample_id,
+        sample_ids=sample_ids,
+        avg_slope=avg_slope,
+        avg_radius=avg_radius,
+        avg_roughness=avg_rough,
+        times=agg_times,
+        radii=agg_radii,
+        roughness=agg_rough,
+    )
+
+
 def reclassify_with_baseline(sample_id: int) -> int:
     baseline_anoms = detect_baseline_deviation_anomalies(sample_id)
     series_anoms = analyze_sample_anomalies(sample_id)

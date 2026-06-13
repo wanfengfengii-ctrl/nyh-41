@@ -249,9 +249,8 @@ class SampleManagementTab(QWidget):
 
     def __init__(self):
         super().__init__()
+        self._data_loaded = False
         self._init_ui()
-        self._load_samples()
-        self._refresh_paper_types()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -382,7 +381,13 @@ class SampleManagementTab(QWidget):
         samples = db.get_all_samples()
         self.sample_model.update_data(samples)
         self._refresh_paper_types()
+        self._data_loaded = True
         self.data_updated.emit()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._data_loaded:
+            self._load_samples()
 
     def _add_sample(self):
         sample_no = self.sample_no_edit.text().strip()
@@ -493,18 +498,61 @@ class SampleManagementTab(QWidget):
             return
         sample_id = row["id"]
         sample_no = row["sample_no"]
+        paper_type = row["paper_type"]
         reply = QMessageBox.question(
             self, "确认",
-            f"确定要取消试样 '{sample_no}' 的基线标记吗？\n（纸型基线模板若来源为本试样，建议重新设定新的基线）",
+            f"确定要取消试样 '{sample_no}' 的基线标记吗？",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply != QMessageBox.Yes:
             return
         try:
             db.set_sample_baseline(sample_id, 0)
+
+            remaining_baselines = db.get_baselines_by_paper_type(paper_type)
+            template = db.get_baseline_template_by_paper(paper_type)
+
+            if remaining_baselines:
+                try:
+                    bl = anomaly_detection.build_aggregated_baseline(paper_type)
+                    if bl:
+                        remaining_nos = ", ".join(
+                            db.get_sample_by_id(sid)["sample_no"]
+                            for sid in bl.sample_ids
+                            if db.get_sample_by_id(sid)
+                        )
+                        QMessageBox.information(
+                            self, "成功",
+                            f"已取消试样「{sample_no}」的基线标记。\n"
+                            f"纸型「{paper_type}」基线模板已用剩余基线试样重建：{remaining_nos}"
+                        )
+                    else:
+                        if template:
+                            db.delete_baseline_template(template["id"])
+                        QMessageBox.information(
+                            self, "成功",
+                            f"已取消试样「{sample_no}」的基线标记。\n"
+                            f"剩余基线试样数据不足，已删除「{paper_type}」基线模板。"
+                        )
+                except Exception:
+                    if template:
+                        db.delete_baseline_template(template["id"])
+                    QMessageBox.information(
+                        self, "成功",
+                        f"已取消试样「{sample_no}」的基线标记。\n"
+                        f"重建模板失败，已删除「{paper_type}」基线模板。"
+                    )
+            else:
+                if template:
+                    db.delete_baseline_template(template["id"])
+                QMessageBox.information(
+                    self, "成功",
+                    f"已取消试样「{sample_no}」的基线标记。\n"
+                    f"纸型「{paper_type}」已无基线试样，基线模板已一并删除。"
+                )
+
             self._load_samples()
             self.data_updated.emit()
-            QMessageBox.information(self, "成功", "已取消基线标记")
         except Exception as e:
             QMessageBox.warning(self, "失败", str(e))
 
@@ -537,8 +585,8 @@ class MeasurementTab(QWidget):
     def __init__(self):
         super().__init__()
         self._selected_sample_id = None
+        self._data_loaded = False
         self._init_ui()
-        self._load_samples()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -621,6 +669,12 @@ class MeasurementTab(QWidget):
             text = f"{s['sample_no']} ({s['paper_type']})"
             self.sample_combo.addItem(text, s["id"])
         self.sample_combo.blockSignals(False)
+        self._data_loaded = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._data_loaded:
+            self._load_samples()
 
     def _on_sample_changed(self, idx):
         self._selected_sample_id = self.sample_combo.itemData(idx)
@@ -878,8 +932,8 @@ class ComparisonTab(QWidget):
         self._plot_curves = {}
         self._plot_scatters = {}
         self._detail_cards = []
+        self._data_loaded = False
         self._init_ui()
-        self._load_samples()
 
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
@@ -1054,6 +1108,13 @@ class ComparisonTab(QWidget):
                 item.setFont(f)
             self.sample_list.addItem(item)
             self._plot_curves[s["id"]] = color
+
+        self._data_loaded = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._data_loaded:
+            self._load_samples()
 
     def _clear_detail_cards(self):
         while self.detail_scroll_layout.count():
@@ -1333,8 +1394,8 @@ class CsvImportTab(QWidget):
 
     def __init__(self):
         super().__init__()
+        self._data_loaded = False
         self._init_ui()
-        self._load_failures()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -1430,6 +1491,12 @@ class CsvImportTab(QWidget):
     def _load_failures(self):
         failures = db.get_import_failures()
         self.failures_model.update_data(failures)
+        self._data_loaded = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._data_loaded:
+            self._load_failures()
 
     def _clear_failures(self):
         reply = QMessageBox.question(
@@ -1574,8 +1641,8 @@ class BaselineTemplateTab(QWidget):
 
     def __init__(self):
         super().__init__()
+        self._data_loaded = False
         self._init_ui()
-        self._load_templates()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -1658,6 +1725,12 @@ class BaselineTemplateTab(QWidget):
             rows.append(d)
         self.template_model.update_data(rows)
         self._load_risk_stats()
+        self._data_loaded = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._data_loaded:
+            self._load_templates()
 
     def _load_risk_stats(self):
         stats = db.get_paper_type_risk_summary()
@@ -1679,15 +1752,24 @@ class BaselineTemplateTab(QWidget):
         if not baselines:
             QMessageBox.warning(self, "失败", f"纸型「{paper_type}」下没有标记为基线的试样，请先在试样管理中标记")
             return
-        main_bl = baselines[0]
         try:
-            bl = anomaly_detection.build_baseline_from_sample(main_bl["id"])
+            bl = anomaly_detection.build_aggregated_baseline(paper_type)
             if bl:
-                QMessageBox.information(self, "成功", f"已重建「{paper_type}」基线模板（来源试样：{main_bl['sample_no']}）")
+                sample_nos = ", ".join(
+                    db.get_sample_by_id(sid)["sample_no"]
+                    for sid in bl.sample_ids
+                    if db.get_sample_by_id(sid)
+                )
+                QMessageBox.information(
+                    self, "成功",
+                    f"已重建「{paper_type}」基线模板\n"
+                    f"聚合基线试样: {sample_nos}\n"
+                    f"平均斜率: {bl.avg_slope:.4f}，平均半径: {bl.avg_radius:.2f}mm"
+                )
                 self._load_templates()
                 self.data_updated.emit()
             else:
-                QMessageBox.warning(self, "失败", "重建失败，请检查测量数据")
+                QMessageBox.warning(self, "失败", "重建失败，请检查基线试样的测量数据（需至少3个点）")
         except Exception as e:
             QMessageBox.warning(self, "失败", str(e))
 
@@ -1716,28 +1798,33 @@ class BaselineTemplateTab(QWidget):
         paper_types = db.get_all_paper_types()
         rebuilt = 0
         failed = 0
+        details = []
         for pt in paper_types:
             baselines = db.get_baselines_by_paper_type(pt)
             if not baselines:
                 continue
             try:
-                bl = anomaly_detection.build_baseline_from_sample(baselines[0]["id"])
+                bl = anomaly_detection.build_aggregated_baseline(pt)
                 if bl:
                     rebuilt += 1
+                    details.append(f"「{pt}」: 聚合 {len(bl.sample_ids)} 个基线试样")
                 else:
                     failed += 1
-            except Exception:
+                    details.append(f"「{pt}」: 重建失败（数据不足）")
+            except Exception as e:
                 failed += 1
+                details.append(f"「{pt}」: 错误 - {e}")
         self._load_templates()
         self.data_updated.emit()
-        QMessageBox.information(self, "完成", f"重建完成：成功 {rebuilt} 个，失败 {failed} 个")
+        msg = f"重建完成：成功 {rebuilt} 个，失败 {failed} 个\n\n" + "\n".join(details)
+        QMessageBox.information(self, "完成", msg)
 
 
 class BatchTab(QWidget):
     def __init__(self):
         super().__init__()
+        self._data_loaded = False
         self._init_ui()
-        self._load_batches()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -1851,6 +1938,12 @@ class BatchTab(QWidget):
         batches = db.get_all_batches()
         self.batch_model.update_data(batches)
         self._refresh_global_aggregation()
+        self._data_loaded = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._data_loaded:
+            self._load_batches()
 
     def _create_batch(self):
         batch_code = self.batch_code_edit.text().strip()
@@ -1966,6 +2059,7 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._init_db()
         self._apply_styles()
+        self._load_initial_data()
 
     def _init_ui(self):
         self.tabs = QTabWidget()
@@ -1985,6 +2079,9 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.csv_tab, "CSV 导入")
         self.tabs.addTab(self.batch_tab, "批次&纸型风险")
 
+        self._connect_signals()
+
+    def _connect_signals(self):
         self.sample_tab.data_updated.connect(self.measurement_tab.refresh_samples)
         self.sample_tab.data_updated.connect(self.comparison_tab.refresh_samples)
         self.sample_tab.data_updated.connect(self.baseline_tab._load_templates)
@@ -2016,6 +2113,9 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("数据库初始化完成")
         except Exception as e:
             QMessageBox.critical(self, "数据库错误", f"数据库初始化失败: {e}")
+
+    def _load_initial_data(self):
+        self.sample_tab._load_samples()
 
     def _apply_styles(self):
         style = """
