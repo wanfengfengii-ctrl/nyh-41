@@ -18,6 +18,7 @@ import db
 import models
 import csv_importer
 import anomaly_detection
+import prescription_engine
 
 
 pg.setConfigOptions(antialias=True, background='w', foreground='k')
@@ -241,6 +242,162 @@ class ImportFailureTableModel(QAbstractTableModel):
             elif col == 4:
                 return row["imported_at"]
 
+        return None
+
+
+class PrescriptionTableModel(QAbstractTableModel):
+    HEADERS = ["编号", "试样编号", "纸型", "批次", "异常类型", "稀释比例", "点墨量", "环境", "置信度", "来源", "记录数", "最佳评级", "创建时间"]
+
+    def __init__(self, data: Optional[List] = None):
+        super().__init__()
+        self._data = data or []
+
+    def update_data(self, data: List):
+        self.beginResetModel()
+        self._data = data
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self._data)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self.HEADERS)
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return self.HEADERS[section]
+        return None
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid() or index.row() >= len(self._data):
+            return None
+        row = self._data[index.row()]
+        col = index.column()
+        if role == Qt.DisplayRole:
+            if col == 0: return row["id"]
+            elif col == 1: return row["sample_no"] if row.get("sample_no") else "-"
+            elif col == 2: return row["paper_type"]
+            elif col == 3: return row.get("batch_code") or "-"
+            elif col == 4: return row.get("anomaly_type") or "-"
+            elif col == 5:
+                val = row.get("dilution_ratio") or "-"
+                return val if len(val) <= 30 else val[:30] + "..."
+            elif col == 6:
+                val = row.get("ink_amount") or "-"
+                return val if len(val) <= 25 else val[:25] + "..."
+            elif col == 7:
+                val = row.get("environment") or "-"
+                return val if len(val) <= 25 else val[:25] + "..."
+            elif col == 8:
+                cs = row.get("confidence_score", 0) or 0
+                return f"{cs*100:.0f}%"
+            elif col == 9:
+                src = row.get("source") or ""
+                if src.startswith("rule:"):
+                    src = src[5:]
+                return src
+            elif col == 10:
+                return str(row.get("record_count", 0))
+            elif col == 11:
+                r = row.get("best_rating")
+                return r if r else "-"
+            elif col == 12:
+                return row.get("created_at", "")
+        if role == Qt.ForegroundRole:
+            if col == 8:
+                cs = row.get("confidence_score", 0) or 0
+                if cs >= 0.8: return QColor("#27ae60")
+                elif cs >= 0.6: return QColor("#2980b9")
+                elif cs >= 0.4: return QColor("#f1c40f")
+                else: return QColor("#c0392b")
+            if col == 11:
+                r = row.get("best_rating")
+                if r == "优": return QColor("#27ae60")
+                elif r == "良": return QColor("#2980b9")
+                elif r == "中": return QColor("#f1c40f")
+                elif r == "差": return QColor("#c0392b")
+            if col == 10 and row.get("record_count", 0) > 0:
+                return QColor("#27ae60")
+        if role == Qt.ToolTipRole:
+            if col in (5, 6, 7):
+                return row.get({5: "dilution_ratio", 6: "ink_amount", 7: "environment"}[col]) or ""
+        return None
+
+
+class ExperimentRecordTableModel(QAbstractTableModel):
+    HEADERS = ["编号", "处方ID", "试样", "复测试样", "纸型", "批次", "执行日期", "扩散改善", "异常降低", "影响纸性", "前风险", "后风险", "前异常%", "后异常%", "评级", "操作员", "创建时间"]
+
+    def __init__(self, data: Optional[List] = None):
+        super().__init__()
+        self._data = data or []
+
+    def update_data(self, data: List):
+        self.beginResetModel()
+        self._data = data
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self._data)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self.HEADERS)
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return self.HEADERS[section]
+        return None
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid() or index.row() >= len(self._data):
+            return None
+        row = self._data[index.row()]
+        col = index.column()
+        if role == Qt.DisplayRole:
+            if col == 0: return row["id"]
+            elif col == 1: return row.get("prescription_id", "-")
+            elif col == 2: return row.get("sample_no", "-")
+            elif col == 3: return row.get("retest_sample_no") or "-"
+            elif col == 4: return row["paper_type"]
+            elif col == 5: return row.get("batch_code") or "-"
+            elif col == 6: return row.get("execute_date") or row.get("created_at", "")[:10]
+            elif col == 7: return "是" if row.get("diffusion_improved") else "否"
+            elif col == 8: return "是" if row.get("anomaly_reduced") else "否"
+            elif col == 9: return "是" if row.get("paper_judgment_affected") else "否"
+            elif col == 10: return row.get("pre_risk_flag") or "-"
+            elif col == 11: return row.get("post_risk_flag") or "-"
+            elif col == 12:
+                v = row.get("pre_anomaly_ratio", 0) or 0
+                return f"{v*100:.1f}%"
+            elif col == 13:
+                v = row.get("post_anomaly_ratio", 0) or 0
+                return f"{v*100:.1f}%"
+            elif col == 14: return row.get("effect_rating") or "-"
+            elif col == 15: return row.get("operator") or "-"
+            elif col == 16: return row.get("created_at", "")
+        if role == Qt.ForegroundRole:
+            if col in (7, 8):
+                key = {7: "diffusion_improved", 8: "anomaly_reduced"}[col]
+                if row.get(key):
+                    return QColor("#27ae60")
+                else:
+                    return QColor("#c0392b")
+            if col == 9:
+                if row.get("paper_judgment_affected"):
+                    return QColor("#c0392b")
+                else:
+                    return QColor("#27ae60")
+            if col in (10, 11):
+                risk = row.get({10: "pre_risk_flag", 11: "post_risk_flag"}[col]) or "正常"
+                if risk == "高风险": return QColor("#c0392b")
+                elif risk == "中风险": return QColor("#e67e22")
+                elif risk == "低风险": return QColor("#f1c40f")
+                else: return QColor("#27ae60")
+            if col == 14:
+                r = row.get("effect_rating")
+                if r == "优": return QColor("#27ae60")
+                elif r == "良": return QColor("#2980b9")
+                elif r == "中": return QColor("#f1c40f")
+                elif r == "差": return QColor("#c0392b")
         return None
 
 
@@ -1471,8 +1628,12 @@ class CsvImportTab(QWidget):
             f"总行数: {summary.total_rows}",
             f"试样: 新增 {summary.samples_created}，跳过 {summary.samples_skipped}",
             f"测量: 新增 {summary.measurements_created}，跳过 {summary.measurements_skipped}",
-            f"失败: {summary.failures}",
         ]
+        if summary.prescriptions_created > 0 or summary.prescriptions_skipped > 0:
+            result_lines.append(f"处方: 新增 {summary.prescriptions_created}，跳过 {summary.prescriptions_skipped}")
+        if summary.experiment_records_created > 0 or summary.experiment_records_skipped > 0:
+            result_lines.append(f"实验记录: 新增 {summary.experiment_records_created}，跳过 {summary.experiment_records_skipped}")
+        result_lines.append(f"失败: {summary.failures}")
         result_lines.extend(summary.messages)
 
         self.result_text.setPlainText("\n".join(result_lines))
@@ -1820,6 +1981,941 @@ class BaselineTemplateTab(QWidget):
         QMessageBox.information(self, "完成", msg)
 
 
+class RepairPrescriptionTab(QWidget):
+    data_updated = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self._selected_sample_id = None
+        self._current_prescription_id = None
+        self._current_recommendation = None
+        self._data_loaded = False
+        self._init_ui()
+
+    def _init_ui(self):
+        main_splitter = QSplitter(Qt.Horizontal)
+        top_layout = QVBoxLayout(self)
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_panel.setMaximumWidth(420)
+
+        sample_group = QGroupBox("选择试样 & 生成推荐处方")
+        sample_layout = QFormLayout(sample_group)
+        self.sample_combo = QComboBox()
+        self.sample_combo.currentIndexChanged.connect(self._on_sample_changed)
+        self.generate_btn = QPushButton("生成推荐处方")
+        self.generate_btn.clicked.connect(self._generate_recommendation)
+        self.generate_btn.setEnabled(False)
+        sample_layout.addRow("选择试样 *", self.sample_combo)
+        sample_layout.addRow("", self.generate_btn)
+        self.sample_info_label = QLabel()
+        self.sample_info_label.setWordWrap(True)
+        self.sample_info_label.setStyleSheet("color: #555; font-size: 12px; padding: 4px;")
+        sample_layout.addRow("", self.sample_info_label)
+        left_layout.addWidget(sample_group)
+
+        presc_group = QGroupBox("修复处方（可手动调整）")
+        presc_layout = QFormLayout(presc_group)
+        self.dilution_edit = QTextEdit()
+        self.dilution_edit.setFixedHeight(60)
+        self.dilution_edit.setPlaceholderText("例如：原墨:蒸馏水 = 1:1.2")
+        self.ink_edit = QTextEdit()
+        self.ink_edit.setFixedHeight(60)
+        self.ink_edit.setPlaceholderText("例如：单次点墨量减少 20%")
+        self.env_edit = QTextEdit()
+        self.env_edit.setFixedHeight(60)
+        self.env_edit.setPlaceholderText("例如：温度 20~24℃，湿度 50%~55% RH")
+        self.retest_edit = QTextEdit()
+        self.retest_edit.setFixedHeight(60)
+        self.retest_edit.setPlaceholderText("例如：点墨后 30s、60s、120s...")
+        self.focus_edit = QTextEdit()
+        self.focus_edit.setFixedHeight(80)
+        self.focus_edit.setPlaceholderText("例如：关注 0~120s 渗化斜率是否回落至基线的 1.1 倍以内")
+        self.remark_edit = QLineEdit()
+        self.remark_edit.setPlaceholderText("处方备注（可选）")
+        presc_layout.addRow("稀释比例 *", self.dilution_edit)
+        presc_layout.addRow("点墨量 *", self.ink_edit)
+        presc_layout.addRow("处理环境 *", self.env_edit)
+        presc_layout.addRow("复测时间 *", self.retest_edit)
+        presc_layout.addRow("观察重点 *", self.focus_edit)
+        presc_layout.addRow("备注", self.remark_edit)
+
+        presc_btn_row = QHBoxLayout()
+        self.save_presc_btn = QPushButton("💾 保存处方")
+        self.save_presc_btn.clicked.connect(self._save_prescription)
+        self.save_presc_btn.setEnabled(False)
+        self.reset_btn = QPushButton("↺ 恢复推荐")
+        self.reset_btn.clicked.connect(self._reset_to_recommendation)
+        self.reset_btn.setEnabled(False)
+        self.del_presc_btn = QPushButton("🗑 删除当前处方")
+        self.del_presc_btn.clicked.connect(self._delete_current_prescription)
+        self.del_presc_btn.setEnabled(False)
+        presc_btn_row.addWidget(self.save_presc_btn)
+        presc_btn_row.addWidget(self.reset_btn)
+        presc_btn_row.addStretch()
+        presc_btn_row.addWidget(self.del_presc_btn)
+        presc_layout.addRow(presc_btn_row)
+
+        self.confidence_label = QLabel()
+        self.confidence_label.setStyleSheet("color: #2980b9; font-weight: bold; font-size: 12px;")
+        self.confidence_label.setWordWrap(True)
+        presc_layout.addRow("", self.confidence_label)
+        left_layout.addWidget(presc_group, 1)
+        main_splitter.addWidget(left_panel)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+
+        reason_group = QGroupBox("推荐依据 & 历史相似试样匹配")
+        reason_layout = QVBoxLayout(reason_group)
+        self.reason_text = QTextEdit()
+        self.reason_text.setReadOnly(True)
+        self.reason_text.setMaximumHeight(180)
+        self.reason_text.setPlaceholderText("选择试样并生成推荐后，此处显示推荐理由和历史匹配依据...")
+        reason_layout.addWidget(self.reason_text)
+        right_layout.addWidget(reason_group)
+
+        record_group = QGroupBox("录入实验结果")
+        record_layout = QFormLayout(record_group)
+        self.record_presc_combo = QComboBox()
+        self.record_presc_combo.currentIndexChanged.connect(self._on_record_presc_changed)
+        self.retest_sample_combo = QComboBox()
+        self.execute_date_edit = QDateEdit()
+        self.execute_date_edit.setCalendarPopup(True)
+        self.execute_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.execute_date_edit.setDate(datetime.now())
+        self.diff_improved_cb = QCheckBox("扩散改善（渗化曲线回归正常范围）")
+        self.anom_reduced_cb = QCheckBox("异常降低（异常点比例减少）")
+        self.paper_affected_cb = QCheckBox("影响纸性判断（需谨慎）")
+        self.effect_rating_combo = QComboBox()
+        self.effect_rating_combo.addItems(["-", "优", "良", "中", "差"])
+        self.operator_edit = QLineEdit()
+        self.operator_edit.setPlaceholderText("操作员姓名（可选）")
+        self.record_remark_edit = QLineEdit()
+        self.record_remark_edit.setPlaceholderText("实验备注（可选）")
+
+        self.pre_metrics_label = QLabel()
+        self.pre_metrics_label.setStyleSheet("color: #c0392b; font-size: 11px;")
+        self.pre_metrics_label.setWordWrap(True)
+        self.post_metrics_label = QLabel()
+        self.post_metrics_label.setStyleSheet("color: #27ae60; font-size: 11px;")
+        self.post_metrics_label.setWordWrap(True)
+
+        record_layout.addRow("关联处方 *", self.record_presc_combo)
+        record_layout.addRow("复测试样编号 *", self.retest_sample_combo)
+        record_layout.addRow("执行日期", self.execute_date_edit)
+        record_layout.addRow("", self.diff_improved_cb)
+        record_layout.addRow("", self.anom_reduced_cb)
+        record_layout.addRow("", self.paper_affected_cb)
+        record_layout.addRow("效果评级", self.effect_rating_combo)
+        record_layout.addRow("操作员", self.operator_edit)
+        record_layout.addRow("备注", self.record_remark_edit)
+
+        capture_btn_row = QHBoxLayout()
+        self.capture_pre_btn = QPushButton("📊 捕获修复前指标")
+        self.capture_pre_btn.clicked.connect(self._capture_pre_metrics)
+        self.capture_post_btn = QPushButton("📊 捕获修复后指标")
+        self.capture_post_btn.clicked.connect(self._capture_post_metrics)
+        capture_btn_row.addWidget(self.capture_pre_btn)
+        capture_btn_row.addWidget(self.capture_post_btn)
+        record_layout.addRow(capture_btn_row)
+        record_layout.addRow("修复前:", self.pre_metrics_label)
+        record_layout.addRow("修复后:", self.post_metrics_label)
+
+        record_btn_row = QHBoxLayout()
+        self.save_record_btn = QPushButton("💾 保存实验记录")
+        self.save_record_btn.clicked.connect(self._save_experiment_record)
+        self.clear_record_btn = QPushButton("清空")
+        self.clear_record_btn.clicked.connect(self._clear_record_form)
+        record_btn_row.addWidget(self.save_record_btn)
+        record_btn_row.addWidget(self.clear_record_btn)
+        record_btn_row.addStretch()
+        record_layout.addRow(record_btn_row)
+        right_layout.addWidget(record_group)
+
+        presc_list_group = QGroupBox("该试样处方列表（点击加载详情）")
+        presc_list_layout = QVBoxLayout(presc_list_group)
+        self.presc_list_table = QTableView()
+        self.presc_list_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.presc_list_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.presc_list_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.presc_list_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.presc_list_model = PrescriptionTableModel()
+        self.presc_list_table.setModel(self.presc_list_model)
+        self.presc_list_table.selectionModel().selectionChanged.connect(self._on_presc_list_selected)
+        presc_list_layout.addWidget(self.presc_list_table, 1)
+        right_layout.addWidget(presc_list_group, 1)
+
+        main_splitter.addWidget(right_panel)
+        main_splitter.setStretchFactor(0, 1)
+        main_splitter.setStretchFactor(1, 2)
+        top_layout.addWidget(main_splitter)
+
+        self._pre_metrics_captured = None
+        self._post_metrics_captured = None
+
+    def _load_samples(self):
+        self.sample_combo.blockSignals(True)
+        self.sample_combo.clear()
+        self.sample_combo.addItem("-- 请选择试样 --", None)
+        samples = db.get_all_samples()
+        for s in samples:
+            mark = " ★" if s.get("is_baseline", 0) else ""
+            risk = s["risk_flag"] or "正常"
+            text = f"{s['sample_no']} ({s['paper_type']}){mark} - {risk}"
+            self.sample_combo.addItem(text, s["id"])
+        self.sample_combo.blockSignals(False)
+
+        self.retest_sample_combo.blockSignals(True)
+        self.retest_sample_combo.clear()
+        self.retest_sample_combo.addItem("-- 请选择复测试样 --", None)
+        for s in samples:
+            self.retest_sample_combo.addItem(f"{s['sample_no']} ({s['paper_type']})", s["id"])
+        self.retest_sample_combo.blockSignals(False)
+
+        self._refresh_record_presc_combo()
+        self._data_loaded = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._data_loaded:
+            self._load_samples()
+
+    def refresh_samples(self):
+        current_sample = self._selected_sample_id
+        self._load_samples()
+        if current_sample:
+            for i in range(self.sample_combo.count()):
+                if self.sample_combo.itemData(i) == current_sample:
+                    self.sample_combo.setCurrentIndex(i)
+                    break
+        self._refresh_record_presc_combo()
+        self._refresh_presc_list()
+
+    def _on_sample_changed(self, idx):
+        self._selected_sample_id = self.sample_combo.itemData(idx)
+        self.generate_btn.setEnabled(self._selected_sample_id is not None)
+        if self._selected_sample_id is not None:
+            sample = db.get_sample_by_id(self._selected_sample_id)
+            if sample:
+                meas = db.get_measurements_by_sample(self._selected_sample_id)
+                anom = sum(1 for m in meas if m["is_anomaly"])
+                ratio = anom / len(meas) if meas else 0
+                batch = sample["batch_code"] or "无批次"
+                self.sample_info_label.setText(
+                    f"纸型: {sample['paper_type']} | 批次: {batch} | 风险: {sample['risk_flag']} | "
+                    f"测量点: {len(meas)} | 异常点: {anom} ({ratio*100:.0f}%)"
+                )
+            self._refresh_presc_list()
+        else:
+            self.sample_info_label.setText("")
+            self.presc_list_model.update_data([])
+
+    def _refresh_presc_list(self):
+        if self._selected_sample_id is None:
+            self.presc_list_model.update_data([])
+            return
+        summary = prescription_engine.get_prescription_history_summary(sample_id=self._selected_sample_id)
+        self.presc_list_model.update_data(summary)
+
+    def _refresh_record_presc_combo(self):
+        self.record_presc_combo.blockSignals(True)
+        current = self.record_presc_combo.currentData()
+        self.record_presc_combo.clear()
+        self.record_presc_combo.addItem("-- 请选择处方 --", None)
+        all_prescs = db.get_all_prescriptions()
+        for p in all_prescs:
+            label = f"#{p['id']} {p.get('sample_no', '')} ({p['paper_type']})"
+            if p.get("dilution_ratio"):
+                snippet = p["dilution_ratio"][:30]
+                label += f" - {snippet}"
+            self.record_presc_combo.addItem(label, p["id"])
+        if current:
+            for i in range(self.record_presc_combo.count()):
+                if self.record_presc_combo.itemData(i) == current:
+                    self.record_presc_combo.setCurrentIndex(i)
+                    break
+        self.record_presc_combo.blockSignals(False)
+
+    def _on_record_presc_changed(self, idx):
+        pid = self.record_presc_combo.itemData(idx)
+        if pid is None:
+            return
+        presc = db.get_prescription_by_id(pid)
+        if presc and presc.get("sample_id"):
+            for i in range(self.sample_combo.count()):
+                if self.sample_combo.itemData(i) == presc["sample_id"]:
+                    self.sample_combo.blockSignals(True)
+                    self.sample_combo.setCurrentIndex(i)
+                    self.sample_combo.blockSignals(False)
+                    self._selected_sample_id = presc["sample_id"]
+                    self._refresh_presc_list()
+                    break
+
+    def _generate_recommendation(self):
+        if self._selected_sample_id is None:
+            QMessageBox.information(self, "提示", "请先选择一个试样")
+            return
+        sample = db.get_sample_by_id(self._selected_sample_id)
+        meas = db.get_measurements_by_sample(self._selected_sample_id)
+        if len(meas) < 3:
+            QMessageBox.warning(self, "测量数据不足",
+                f"试样仅有 {len(meas)} 个测量点，至少需要 3 个点才能生成可靠推荐。\n请先在「测量录入」中补充数据。")
+            return
+        try:
+            rec = prescription_engine.recommend_prescription(self._selected_sample_id)
+            if rec is None:
+                QMessageBox.warning(self, "生成失败", "无法生成推荐处方，请检查试样数据")
+                return
+            self._current_recommendation = rec
+            self._populate_presc_fields(rec)
+            self.dilution_edit.setEnabled(True)
+            self.ink_edit.setEnabled(True)
+            self.env_edit.setEnabled(True)
+            self.retest_edit.setEnabled(True)
+            self.focus_edit.setEnabled(True)
+            self.remark_edit.setEnabled(True)
+            self.save_presc_btn.setEnabled(True)
+            self.reset_btn.setEnabled(True)
+            self.confidence_label.setText(
+                f"🎯 推荐置信度: {rec.confidence_score*100:.0f}% | 来源: {rec.source}"
+            )
+            reason_lines = []
+            if rec.match_reasons:
+                reason_lines.append("📋 匹配依据与历史参考：")
+                for i, r in enumerate(rec.match_reasons, 1):
+                    reason_lines.append(f"  {i}. {r}")
+            else:
+                reason_lines.append("暂无历史相似试样，参考通用规则生成。")
+            self.reason_text.setPlainText("\n".join(reason_lines))
+        except Exception as e:
+            QMessageBox.warning(self, "生成失败", str(e))
+
+    def _populate_presc_fields(self, rec):
+        self.dilution_edit.setPlainText(rec.dilution_ratio or "")
+        self.ink_edit.setPlainText(rec.ink_amount or "")
+        self.env_edit.setPlainText(rec.environment or "")
+        self.retest_edit.setPlainText(rec.retest_time or "")
+        self.focus_edit.setPlainText(rec.observation_focus or "")
+
+    def _reset_to_recommendation(self):
+        if self._current_recommendation:
+            self._populate_presc_fields(self._current_recommendation)
+
+    def _save_prescription(self):
+        if self._selected_sample_id is None:
+            return
+        dilution = self.dilution_edit.toPlainText().strip()
+        ink = self.ink_edit.toPlainText().strip()
+        env = self.env_edit.toPlainText().strip()
+        retest = self.retest_edit.toPlainText().strip()
+        focus = self.focus_edit.toPlainText().strip()
+        remark = self.remark_edit.text().strip() or None
+
+        if not (dilution and ink and env and retest and focus):
+            QMessageBox.warning(self, "验证失败", "请填写所有处方字段（稀释比例、点墨量、环境、复测时间、观察重点）")
+            return
+
+        try:
+            if self._current_prescription_id is not None:
+                ok = prescription_engine.update_prescription_manually(
+                    self._current_prescription_id,
+                    dilution_ratio=dilution,
+                    ink_amount=ink,
+                    environment=env,
+                    retest_time=retest,
+                    observation_focus=focus,
+                    remark=remark,
+                )
+                if ok:
+                    QMessageBox.information(self, "成功", f"处方 #{self._current_prescription_id} 已更新！")
+                else:
+                    QMessageBox.warning(self, "失败", "更新处方失败")
+            else:
+                sample = db.get_sample_by_id(self._selected_sample_id)
+                paper_type = sample["paper_type"] if sample else ""
+                pid = prescription_engine.generate_and_save_prescription(
+                    self._selected_sample_id,
+                    remark=remark,
+                )
+                if pid is not None and (self._current_recommendation and (
+                    self._current_recommendation.dilution_ratio != dilution or
+                    self._current_recommendation.ink_amount != ink or
+                    self._current_recommendation.environment != env or
+                    self._current_recommendation.retest_time != retest or
+                    self._current_recommendation.observation_focus != focus
+                )):
+                    db.update_prescription(
+                        prescription_id=pid,
+                        dilution_ratio=dilution,
+                        ink_amount=ink,
+                        environment=env,
+                        retest_time=retest,
+                        observation_focus=focus,
+                    )
+                if pid is None:
+                    new_row = dict(db.get_prescription_by_id(pid or 0)) if 0 else None
+                    pid = db.create_prescription(
+                        sample_id=self._selected_sample_id,
+                        paper_type=paper_type,
+                        anomaly_type=None,
+                        dilution_ratio=dilution,
+                        ink_amount=ink,
+                        environment=env,
+                        retest_time=retest,
+                        observation_focus=focus,
+                        source="manual_edit",
+                        confidence_score=self._current_recommendation.confidence_score if self._current_recommendation else 0.5,
+                        remark=remark,
+                    )
+                    self._current_prescription_id = pid
+                QMessageBox.information(self, "成功", f"处方 #{pid} 已保存！")
+                self._current_prescription_id = pid
+                self.del_presc_btn.setEnabled(True)
+            self._refresh_presc_list()
+            self._refresh_record_presc_combo()
+            self.data_updated.emit()
+        except Exception as e:
+            QMessageBox.warning(self, "保存失败", str(e))
+
+    def _on_presc_list_selected(self):
+        idx = self.presc_list_table.currentIndex()
+        if not idx.isValid():
+            return
+        source_idx = self.presc_list_table.model()
+        if hasattr(source_idx, 'mapToSource'):
+            idx = self.presc_list_table.selectionModel().currentIndex()
+        row = self.presc_list_model._data[idx.row()]
+        pid = row["id"]
+        self._current_prescription_id = pid
+        self.del_presc_btn.setEnabled(True)
+        for i in range(self.record_presc_combo.count()):
+            if self.record_presc_combo.itemData(i) == pid:
+                self.record_presc_combo.setCurrentIndex(i)
+                break
+        presc = db.get_prescription_by_id(pid)
+        if presc:
+            self.dilution_edit.setPlainText(presc.get("dilution_ratio") or "")
+            self.ink_edit.setPlainText(presc.get("ink_amount") or "")
+            self.env_edit.setPlainText(presc.get("environment") or "")
+            self.retest_edit.setPlainText(presc.get("retest_time") or "")
+            self.focus_edit.setPlainText(presc.get("observation_focus") or "")
+            self.remark_edit.setText(presc.get("remark") or "")
+            self.save_presc_btn.setEnabled(True)
+            self.reset_btn.setEnabled(True)
+            self.dilution_edit.setEnabled(True)
+            self.ink_edit.setEnabled(True)
+            self.env_edit.setEnabled(True)
+            self.retest_edit.setEnabled(True)
+            self.focus_edit.setEnabled(True)
+            self.remark_edit.setEnabled(True)
+            cs = presc.get("confidence_score") or 0
+            src = presc.get("source") or "manual"
+            self.confidence_label.setText(f"📋 处方ID: {pid} | 置信度: {cs*100:.0f}% | 来源: {src}")
+
+    def _delete_current_prescription(self):
+        if self._current_prescription_id is None:
+            return
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除处方 #{self._current_prescription_id} 及其所有实验记录吗？\n此操作不可撤销！",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            db.delete_prescription(self._current_prescription_id)
+            QMessageBox.information(self, "成功", "处方已删除")
+            self._current_prescription_id = None
+            self.del_presc_btn.setEnabled(False)
+            self._refresh_presc_list()
+            self._refresh_record_presc_combo()
+            self.data_updated.emit()
+        except Exception as e:
+            QMessageBox.warning(self, "删除失败", str(e))
+
+    def _capture_pre_metrics(self):
+        pid = self.record_presc_combo.currentData()
+        if pid is None:
+            QMessageBox.information(self, "提示", "请先选择关联处方")
+            return
+        presc = db.get_prescription_by_id(pid)
+        if not presc:
+            return
+        sample_id = presc["sample_id"]
+        m = prescription_engine.capture_pre_metrics(sample_id)
+        self._pre_metrics_captured = m
+        slope_str = f"{m['pre_avg_slope']:.4f}" if m.get('pre_avg_slope') else "-"
+        radius_str = f"{m['pre_avg_radius']:.2f}mm" if m.get('pre_avg_radius') else "-"
+        rough_str = f"{m['pre_avg_roughness']:.2f}" if m.get('pre_avg_roughness') else "-"
+        self.pre_metrics_label.setText(
+            f"风险:{m.get('pre_risk_flag') or '-'} | "
+            f"异常率:{m.get('pre_anomaly_ratio', 0)*100:.1f}% | "
+            f"斜率:{slope_str} | 半径:{radius_str} | 毛糙:{rough_str}"
+        )
+
+    def _capture_post_metrics(self):
+        sid = self.retest_sample_combo.currentData()
+        if sid is None:
+            QMessageBox.information(self, "提示", "请先选择复测试样")
+            return
+        m = prescription_engine.capture_post_metrics(sid)
+        self._post_metrics_captured = m
+        radius_str = f"{m.get('pre_avg_radius'):.2f}mm" if m.get('pre_avg_radius') else "-"
+        rough_str = f"{m.get('pre_avg_roughness'):.2f}" if m.get('pre_avg_roughness') else "-"
+        slope_str = f"{m.get('pre_avg_slope'):.4f}" if m.get('pre_avg_slope') else "-"
+        self.post_metrics_label.setText(
+            f"风险:{m.get('pre_risk_flag') or '-'} | "
+            f"异常率:{m.get('pre_anomaly_ratio', 0)*100:.1f}% | "
+            f"斜率:{slope_str} | 半径:{radius_str} | 毛糙:{rough_str}"
+        )
+
+    def _save_experiment_record(self):
+        pid = self.record_presc_combo.currentData()
+        if pid is None:
+            QMessageBox.warning(self, "提示", "请选择关联处方")
+            return
+        retest_sid = self.retest_sample_combo.currentData()
+        if retest_sid is None:
+            QMessageBox.warning(self, "提示", "请选择复测试样")
+            return
+        rating = self.effect_rating_combo.currentText()
+        if rating == "-":
+            rating = None
+        pre = self._pre_metrics_captured or {}
+        post = self._post_metrics_captured or {}
+        presc = db.get_prescription_by_id(pid)
+        sample_row = db.get_sample_by_id(retest_sid)
+        paper_type = presc["paper_type"] if presc else (sample_row["paper_type"] if sample_row else "")
+        batch_id = sample_row["batch_id"] if sample_row else None
+        retest_no = self.retest_sample_combo.currentText().split(" ")[0]
+        try:
+            rid = db.create_experiment_record(
+                prescription_id=pid,
+                sample_id=retest_sid,
+                paper_type=paper_type,
+                batch_id=batch_id,
+                retest_sample_no=retest_no,
+                execute_date=self.execute_date_edit.date().toString("yyyy-MM-dd"),
+                diffusion_improved=1 if self.diff_improved_cb.isChecked() else 0,
+                anomaly_reduced=1 if self.anom_reduced_cb.isChecked() else 0,
+                paper_judgment_affected=1 if self.paper_affected_cb.isChecked() else 0,
+                pre_risk_flag=pre.get("pre_risk_flag"),
+                post_risk_flag=post.get("pre_risk_flag"),
+                pre_anomaly_ratio=pre.get("pre_anomaly_ratio", 0.0),
+                post_anomaly_ratio=post.get("pre_anomaly_ratio", 0.0),
+                pre_avg_slope=pre.get("pre_avg_slope"),
+                post_avg_slope=post.get("pre_avg_slope"),
+                pre_avg_radius=pre.get("pre_avg_radius"),
+                post_avg_radius=post.get("pre_avg_radius"),
+                pre_avg_roughness=pre.get("pre_avg_roughness"),
+                post_avg_roughness=post.get("pre_avg_roughness"),
+                effect_rating=rating,
+                operator=self.operator_edit.text().strip() or None,
+                remark=self.record_remark_edit.text().strip() or None,
+            )
+            QMessageBox.information(self, "成功", f"实验记录 #{rid} 已保存！")
+            self._clear_record_form()
+            self._refresh_presc_list()
+            self.data_updated.emit()
+        except Exception as e:
+            QMessageBox.warning(self, "保存失败", str(e))
+
+    def _clear_record_form(self):
+        self.diff_improved_cb.setChecked(False)
+        self.anom_reduced_cb.setChecked(False)
+        self.paper_affected_cb.setChecked(False)
+        self.effect_rating_combo.setCurrentIndex(0)
+        self.operator_edit.clear()
+        self.record_remark_edit.clear()
+        self.pre_metrics_label.setText("")
+        self.post_metrics_label.setText("")
+        self._pre_metrics_captured = None
+        self._post_metrics_captured = None
+
+
+class PrescriptionHistoryTab(QWidget):
+    data_updated = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self._data_loaded = False
+        self._selected_record = None
+        self._init_ui()
+
+    def _init_ui(self):
+        main_layout = QVBoxLayout(self)
+
+        filter_group = QGroupBox("查询筛选")
+        filter_layout = QHBoxLayout(filter_group)
+
+        filter_layout.addWidget(QLabel("纸型:"))
+        self.paper_combo = QComboBox()
+        self.paper_combo.setEditable(True)
+        self.paper_combo.addItem("全部纸型", None)
+        self.paper_combo.setMinimumWidth(180)
+        filter_layout.addWidget(self.paper_combo)
+
+        filter_layout.addWidget(QLabel("批次:"))
+        self.batch_combo = QComboBox()
+        self.batch_combo.addItem("全部批次", None)
+        self.batch_combo.setMinimumWidth(160)
+        filter_layout.addWidget(self.batch_combo)
+
+        filter_layout.addWidget(QLabel("试样编号:"))
+        self.sample_filter_edit = QLineEdit()
+        self.sample_filter_edit.setPlaceholderText("输入试样编号过滤...")
+        self.sample_filter_edit.setMinimumWidth(160)
+        filter_layout.addWidget(self.sample_filter_edit)
+
+        self.query_btn = QPushButton("🔍 查询")
+        self.query_btn.clicked.connect(self._do_query)
+        filter_layout.addWidget(self.query_btn)
+
+        self.refresh_btn = QPushButton("↻ 刷新")
+        self.refresh_btn.clicked.connect(self._refresh_all)
+        filter_layout.addWidget(self.refresh_btn)
+        filter_layout.addStretch()
+        main_layout.addWidget(filter_group)
+
+        stats_group = QGroupBox("推荐命中率统计 & 效果概览")
+        stats_layout = QHBoxLayout(stats_group)
+        self.stats_text = QTextEdit()
+        self.stats_text.setReadOnly(True)
+        self.stats_text.setMaximumHeight(120)
+        stats_layout.addWidget(self.stats_text, 1)
+        main_layout.addWidget(stats_group)
+
+        center_splitter = QSplitter(Qt.Horizontal)
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_panel.setMaximumWidth(720)
+
+        presc_query_group = QGroupBox("处方记录（用了什么方案、何时执行）")
+        presc_query_layout = QVBoxLayout(presc_query_group)
+        self.presc_table = QTableView()
+        self.presc_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.presc_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.presc_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.presc_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.presc_table.horizontalHeader().setSectionResizeMode(10, QHeaderView.ResizeToContents)
+        self.presc_table.horizontalHeader().setSectionResizeMode(11, QHeaderView.ResizeToContents)
+        self.presc_table_model = PrescriptionTableModel()
+        self.presc_filter_proxy = QSortFilterProxyModel()
+        self.presc_filter_proxy.setSourceModel(self.presc_table_model)
+        self.presc_filter_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.presc_filter_proxy.setFilterKeyColumn(1)
+        self.presc_table.setModel(self.presc_filter_proxy)
+        self.presc_table.selectionModel().selectionChanged.connect(self._on_presc_selected)
+        presc_query_layout.addWidget(self.presc_table, 1)
+        left_layout.addWidget(presc_query_group, 1)
+
+        center_splitter.addWidget(left_panel)
+
+        right_panel = QWidget()
+        right_splitter = QSplitter(Qt.Vertical)
+
+        record_group = QGroupBox("实验记录（效果如何）")
+        record_layout = QVBoxLayout(record_group)
+        self.record_table = QTableView()
+        self.record_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.record_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.record_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.record_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.record_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.record_table_model = ExperimentRecordTableModel()
+        self.record_table.setModel(self.record_table_model)
+        self.record_table.selectionModel().selectionChanged.connect(self._on_record_selected)
+        record_layout.addWidget(self.record_table, 1)
+
+        detail_btn_row = QHBoxLayout()
+        self.view_detail_btn = QPushButton("📋 查看完整处方与记录详情")
+        self.view_detail_btn.clicked.connect(self._view_detail)
+        self.del_record_btn = QPushButton("🗑 删除选中记录")
+        self.del_record_btn.clicked.connect(self._delete_selected_record)
+        detail_btn_row.addWidget(self.view_detail_btn)
+        detail_btn_row.addStretch()
+        detail_btn_row.addWidget(self.del_record_btn)
+        record_layout.addLayout(detail_btn_row)
+        right_splitter.addWidget(record_group)
+
+        plots_splitter = QSplitter(Qt.Horizontal)
+
+        curve_group = QGroupBox("处方前后渗化曲线对比（选中实验记录）")
+        curve_layout = QVBoxLayout(curve_group)
+        self.curve_plot = pg.PlotWidget()
+        self.curve_plot.setLabel('left', '扩散半径', units='mm')
+        self.curve_plot.setLabel('bottom', '吸附时间', units='s')
+        self.curve_plot.setTitle("修复前 vs 修复后 渗化曲线")
+        self.curve_plot.showGrid(x=True, y=True)
+        self.curve_plot.addLegend()
+        self.curve_plot.setBackground('#ffffff')
+        curve_layout.addWidget(self.curve_plot, 1)
+        plots_splitter.addWidget(curve_group)
+
+        trend_group = QGroupBox("风险变化趋势（按时间）")
+        trend_layout = QVBoxLayout(trend_group)
+        self.trend_plot = pg.PlotWidget()
+        self.trend_plot.setLabel('left', '风险等级 (0正常→3高风险)')
+        self.trend_plot.setLabel('bottom', '实验序号（按时间）')
+        self.trend_plot.setTitle("风险等级变化趋势")
+        self.trend_plot.showGrid(x=True, y=True)
+        self.trend_plot.setBackground('#ffffff')
+        trend_layout.addWidget(self.trend_plot, 1)
+        plots_splitter.addWidget(trend_group)
+
+        plots_splitter.setStretchFactor(0, 1)
+        plots_splitter.setStretchFactor(1, 1)
+        right_splitter.addWidget(plots_splitter)
+
+        right_splitter.setStretchFactor(0, 1)
+        right_splitter.setStretchFactor(1, 1)
+        right_panel.setLayout(QVBoxLayout())
+        right_panel.layout().addWidget(right_splitter)
+        center_splitter.addWidget(right_panel)
+        center_splitter.setStretchFactor(0, 1)
+        center_splitter.setStretchFactor(1, 2)
+        main_layout.addWidget(center_splitter, 1)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._data_loaded:
+            self._refresh_all()
+
+    def refresh_data(self):
+        self._refresh_all()
+
+    def _refresh_all(self):
+        self._refresh_filter_combos()
+        self._do_query()
+        self._data_loaded = True
+
+    def _refresh_filter_combos(self):
+        current_paper = self.paper_combo.currentData()
+        self.paper_combo.blockSignals(True)
+        self.paper_combo.clear()
+        self.paper_combo.addItem("全部纸型", None)
+        for pt in db.get_all_paper_types():
+            self.paper_combo.addItem(pt, pt)
+        if current_paper:
+            for i in range(self.paper_combo.count()):
+                if self.paper_combo.itemData(i) == current_paper:
+                    self.paper_combo.setCurrentIndex(i)
+                    break
+        self.paper_combo.blockSignals(False)
+
+        current_batch = self.batch_combo.currentData()
+        self.batch_combo.blockSignals(True)
+        self.batch_combo.clear()
+        self.batch_combo.addItem("全部批次", None)
+        for b in db.get_all_batches():
+            self.batch_combo.addItem(b["batch_code"], b["id"])
+        if current_batch:
+            for i in range(self.batch_combo.count()):
+                if self.batch_combo.itemData(i) == current_batch:
+                    self.batch_combo.setCurrentIndex(i)
+                    break
+        self.batch_combo.blockSignals(False)
+
+    def _do_query(self):
+        paper_type = self.paper_combo.currentData()
+        batch_id = self.batch_combo.currentData()
+
+        summary = prescription_engine.get_prescription_history_summary(
+            paper_type=paper_type, batch_id=batch_id
+        )
+        sample_filter = self.sample_filter_edit.text().strip()
+        if sample_filter:
+            summary = [s for s in summary if sample_filter.lower() in (s.get("sample_no") or "").lower()]
+        self.presc_table_model.update_data(summary)
+        self.presc_filter_proxy.setFilterFixedString(sample_filter)
+
+        records = db.get_all_experiment_records(paper_type=paper_type, batch_id=batch_id)
+        record_list = [dict(r) for r in records]
+        if sample_filter:
+            record_list = [r for r in record_list if sample_filter.lower() in (r.get("sample_no") or "").lower() or sample_filter.lower() in (r.get("retest_sample_no") or "").lower()]
+        self.record_table_model.update_data(record_list)
+
+        self._update_stats(paper_type)
+        self._plot_risk_trend(record_list)
+        self._selected_record = None
+        self.curve_plot.clear()
+
+    def _update_stats(self, paper_type):
+        stats = db.get_prescription_hit_stats(paper_type=paper_type)
+        if not stats:
+            self.stats_text.setPlainText("暂无统计数据")
+            return
+        lines = [
+            f"📊 处方总数: {stats.get('total_prescriptions', 0)} | 实验记录总数: {stats.get('total_records', 0)}",
+            f"🎯 扩散改善命中率: {stats.get('hit_rate_diffusion_pct', 0.0)}% （改善次数: {stats.get('diffusion_improved_count', 0)}）",
+            f"🎯 异常降低命中率: {stats.get('hit_rate_anomaly_pct', 0.0)}% （异常减少次数: {stats.get('anomaly_reduced_count', 0)}）",
+            f"📝 不影响纸性比例: {stats.get('rate_no_paper_impact_pct', 0.0)}% | 综合优良率: {stats.get('overall_satisfaction_pct', 0.0)}%",
+            f"⭐ 效果评级 - 优: {stats.get('rating_excellent', 0)} | 良: {stats.get('rating_good', 0)} | 中: {stats.get('rating_mid', 0)} | 差: {stats.get('rating_poor', 0)}",
+            f"📉 平均异常比例降幅: {stats.get('avg_anomaly_reduction_pct', 0.0) or 0.0:.1f}%"
+        ]
+        self.stats_text.setPlainText("\n".join(lines))
+
+    def _plot_risk_trend(self, records):
+        self.trend_plot.clear()
+        if not records:
+            self.trend_plot.setTitle("风险等级变化趋势（无数据）")
+            return
+        sorted_recs = sorted(records, key=lambda r: r.get("created_at") or "")
+        risk_order = {"正常": 0, "低风险": 1, "中风险": 2, "高风险": 3}
+        pre_risks = []
+        post_risks = []
+        indices = []
+        for i, r in enumerate(sorted_recs):
+            pre = risk_order.get(r.get("pre_risk_flag") or "正常", 0)
+            post = risk_order.get(r.get("post_risk_flag") or "正常", 0)
+            indices.append(i + 1)
+            pre_risks.append(pre)
+            post_risks.append(post)
+        if indices:
+            self.trend_plot.plot(
+                np.array(indices, dtype=float), np.array(pre_risks, dtype=float),
+                pen=pg.mkPen(color='#e74c3c', width=2),
+                symbol='o', symbolSize=8, symbolBrush='#e74c3c',
+                name="修复前风险"
+            )
+            self.trend_plot.plot(
+                np.array(indices, dtype=float), np.array(post_risks, dtype=float),
+                pen=pg.mkPen(color='#27ae60', width=2),
+                symbol='s', symbolSize=8, symbolBrush='#27ae60',
+                name="修复后风险"
+            )
+            self.trend_plot.setTitle(f"风险等级变化趋势（共 {len(indices)} 次实验）")
+            yticks = [[0, "正常"], [1, "低风险"], [2, "中风险"], [3, "高风险"]]
+            try:
+                ay = self.trend_plot.getAxis('left')
+                ay.setTicks([yticks])
+            except Exception:
+                pass
+
+    def _on_presc_selected(self):
+        idx = self.presc_table.currentIndex()
+        if not idx.isValid():
+            return
+        src_idx = self.presc_filter_proxy.mapToSource(idx)
+        row = self.presc_table_model._data[src_idx.row()]
+        pid = row["id"]
+        records = db.get_experiment_records_by_prescription(pid)
+        self.record_table_model.update_data([dict(r) for r in records])
+
+    def _on_record_selected(self):
+        idx = self.record_table.currentIndex()
+        if not idx.isValid():
+            return
+        self._selected_record = self.record_table_model._data[idx.row()]
+        self._plot_curves_for_record(self._selected_record)
+
+    def _plot_curves_for_record(self, record):
+        self.curve_plot.clear()
+        self.curve_plot.addLegend()
+        if not record:
+            self.curve_plot.setTitle("修复前 vs 修复后 渗化曲线（请选择实验记录）")
+            return
+        original_sid = None
+        presc = db.get_prescription_by_id(record["prescription_id"])
+        if presc:
+            original_sid = presc["sample_id"]
+        retest_sid = record["sample_id"]
+
+        colors = [('#e74c3c', '修复前'), ('#27ae60', '修复后')]
+        has_any = False
+        for i, (sid, (color, label)) in enumerate(zip([original_sid, retest_sid], colors)):
+            if sid is None:
+                continue
+            meas = db.get_measurements_by_sample(sid)
+            if len(meas) < 2:
+                continue
+            s_idx = sorted(range(len(meas)), key=lambda j: float(meas[j]["adsorb_time"]))
+            times = np.array([float(meas[j]["adsorb_time"]) for j in s_idx], dtype=float)
+            radii = np.array([float(meas[j]["radius"]) for j in s_idx], dtype=float)
+            sample = db.get_sample_by_id(sid)
+            sno = sample["sample_no"] if sample else str(sid)
+            self.curve_plot.plot(
+                times, radii,
+                pen=pg.mkPen(color=color, width=3),
+                symbol='o', symbolSize=7, symbolBrush=color, symbolPen=color,
+                name=f"{label} ({sno})"
+            )
+            has_any = True
+        if not has_any:
+            self.curve_plot.setTitle("修复前 vs 修复后 渗化曲线（无测量数据）")
+        else:
+            self.curve_plot.setTitle("修复前 vs 修复后 渗化曲线对比")
+
+    def _view_detail(self):
+        if not self._selected_record:
+            idx = self.record_table.currentIndex()
+            if idx.isValid():
+                self._selected_record = self.record_table_model._data[idx.row()]
+        if self._selected_record is None:
+            QMessageBox.information(self, "提示", "请先选择一条实验记录")
+            return
+        r = self._selected_record
+        pre_slope = f"{r['pre_avg_slope']:.4f}" if r.get('pre_avg_slope') else "-"
+        post_slope = f"{r['post_avg_slope']:.4f}" if r.get('post_avg_slope') else "-"
+        pre_radius = f"{r['pre_avg_radius']:.2f}mm" if r.get('pre_avg_radius') else "-"
+        post_radius = f"{r['post_avg_radius']:.2f}mm" if r.get('post_avg_radius') else "-"
+        pre_rough = f"{r['pre_avg_roughness']:.2f}" if r.get('pre_avg_roughness') else "-"
+        post_rough = f"{r['post_avg_roughness']:.2f}" if r.get('post_avg_roughness') else "-"
+        detail = (
+            f"========== 处方详情 ==========\n"
+            f"处方ID: {r.get('prescription_id')}\n"
+            f"稀释比例: {r.get('dilution_ratio') or '-'}\n"
+            f"点墨量: {r.get('ink_amount') or '-'}\n"
+            f"处理环境: {r.get('environment') or '-'}\n"
+            f"复测时间: {r.get('presc_retest_time') or '-'}\n"
+            f"观察重点: {r.get('observation_focus') or '-'}\n\n"
+            f"========== 实验结果 ==========\n"
+            f"执行日期: {r.get('execute_date') or r.get('created_at')}\n"
+            f"原试样: {r.get('sample_no')} | 复测试样: {r.get('retest_sample_no') or '-'}\n"
+            f"纸型: {r.get('paper_type')} | 批次: {r.get('batch_code') or '-'}\n"
+            f"扩散改善: {'是' if r.get('diffusion_improved') else '否'} | "
+            f"异常降低: {'是' if r.get('anomaly_reduced') else '否'} | "
+            f"影响纸性: {'是' if r.get('paper_judgment_affected') else '否'}\n"
+            f"效果评级: {r.get('effect_rating') or '-'} | 操作员: {r.get('operator') or '-'}\n"
+            f"风险变化: {r.get('pre_risk_flag') or '-'} → {r.get('post_risk_flag') or '-'}\n"
+            f"异常比例: {r.get('pre_anomaly_ratio', 0)*100:.1f}% → {r.get('post_anomaly_ratio', 0)*100:.1f}%\n"
+            f"渗化斜率: {pre_slope} → {post_slope}\n"
+            f"平均半径: {pre_radius} → {post_radius}\n"
+            f"平均毛糙: {pre_rough} → {post_rough}\n"
+            f"实验备注: {r.get('remark') or '-'}\n"
+        )
+        box = QMessageBox(self)
+        box.setWindowTitle("处方与实验记录详情")
+        box.setText("完整处方与实验记录详情:")
+        box.setDetailedText(detail)
+        box.exec()
+
+    def _delete_selected_record(self):
+        idx = self.record_table.currentIndex()
+        if not idx.isValid():
+            QMessageBox.information(self, "提示", "请先选择一条实验记录")
+            return
+        r = self.record_table_model._data[idx.row()]
+        rid = r["id"]
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除实验记录 #{rid} 吗？\n此操作不可撤销！",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            db.delete_experiment_record(rid)
+            QMessageBox.information(self, "成功", "实验记录已删除")
+            self._do_query()
+            self.data_updated.emit()
+        except Exception as e:
+            QMessageBox.warning(self, "删除失败", str(e))
+
+
 class BatchTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -2070,6 +3166,8 @@ class MainWindow(QMainWindow):
         self.comparison_tab = ComparisonTab()
         self.baseline_tab = BaselineTemplateTab()
         self.csv_tab = CsvImportTab()
+        self.repair_presc_tab = RepairPrescriptionTab()
+        self.presc_history_tab = PrescriptionHistoryTab()
         self.batch_tab = BatchTab()
 
         self.tabs.addTab(self.sample_tab, "试样管理")
@@ -2077,6 +3175,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.comparison_tab, "渗化曲线对比")
         self.tabs.addTab(self.baseline_tab, "纸型基线模板")
         self.tabs.addTab(self.csv_tab, "CSV 导入")
+        self.tabs.addTab(self.repair_presc_tab, "修复处方推荐")
+        self.tabs.addTab(self.presc_history_tab, "处方回溯与统计")
         self.tabs.addTab(self.batch_tab, "批次&纸型风险")
 
         self._connect_signals()
@@ -2086,22 +3186,44 @@ class MainWindow(QMainWindow):
         self.sample_tab.data_updated.connect(self.comparison_tab.refresh_samples)
         self.sample_tab.data_updated.connect(self.baseline_tab._load_templates)
         self.sample_tab.data_updated.connect(self.batch_tab._load_batches)
+        self.sample_tab.data_updated.connect(self.repair_presc_tab.refresh_samples)
+        self.sample_tab.data_updated.connect(self.presc_history_tab.refresh_data)
 
         self.measurement_tab.data_updated.connect(self.sample_tab._load_samples)
         self.measurement_tab.data_updated.connect(self.comparison_tab.refresh_samples)
         self.measurement_tab.data_updated.connect(self.baseline_tab._load_templates)
         self.measurement_tab.data_updated.connect(self.batch_tab._load_batches)
+        self.measurement_tab.data_updated.connect(self.repair_presc_tab.refresh_samples)
+        self.measurement_tab.data_updated.connect(self.presc_history_tab.refresh_data)
 
         self.baseline_tab.data_updated.connect(self.sample_tab._load_samples)
         self.baseline_tab.data_updated.connect(self.measurement_tab.refresh_samples)
         self.baseline_tab.data_updated.connect(self.comparison_tab.refresh_samples)
         self.baseline_tab.data_updated.connect(self.batch_tab._load_batches)
+        self.baseline_tab.data_updated.connect(self.repair_presc_tab.refresh_samples)
+        self.baseline_tab.data_updated.connect(self.presc_history_tab.refresh_data)
 
         self.csv_tab.data_updated.connect(self.sample_tab._load_samples)
         self.csv_tab.data_updated.connect(self.measurement_tab.refresh_samples)
         self.csv_tab.data_updated.connect(self.comparison_tab.refresh_samples)
         self.csv_tab.data_updated.connect(self.baseline_tab._load_templates)
         self.csv_tab.data_updated.connect(self.batch_tab._load_batches)
+        self.csv_tab.data_updated.connect(self.repair_presc_tab.refresh_samples)
+        self.csv_tab.data_updated.connect(self.presc_history_tab.refresh_data)
+
+        self.repair_presc_tab.data_updated.connect(self.sample_tab._load_samples)
+        self.repair_presc_tab.data_updated.connect(self.measurement_tab.refresh_samples)
+        self.repair_presc_tab.data_updated.connect(self.comparison_tab.refresh_samples)
+        self.repair_presc_tab.data_updated.connect(self.baseline_tab._load_templates)
+        self.repair_presc_tab.data_updated.connect(self.batch_tab._load_batches)
+        self.repair_presc_tab.data_updated.connect(self.presc_history_tab.refresh_data)
+
+        self.presc_history_tab.data_updated.connect(self.sample_tab._load_samples)
+        self.presc_history_tab.data_updated.connect(self.measurement_tab.refresh_samples)
+        self.presc_history_tab.data_updated.connect(self.comparison_tab.refresh_samples)
+        self.presc_history_tab.data_updated.connect(self.baseline_tab._load_templates)
+        self.presc_history_tab.data_updated.connect(self.batch_tab._load_batches)
+        self.presc_history_tab.data_updated.connect(self.repair_presc_tab.refresh_samples)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
