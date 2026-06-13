@@ -1,6 +1,7 @@
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 import statistics
+import json
 import db
 
 
@@ -12,12 +13,41 @@ class AnomalyResult:
 
 
 @dataclass
+class BaselineDeviation:
+    time: float
+    sample_radius: float
+    baseline_radius: float
+    diff: float
+    diff_pct: float
+    sample_roughness: float
+    baseline_roughness: float
+    rough_diff: float
+    rough_diff_pct: float
+
+
+@dataclass
+class PaperTypeBaseline:
+    paper_type: str
+    template_id: Optional[int]
+    baseline_sample_id: Optional[int]
+    sample_ids: List[int]
+    avg_slope: float
+    avg_radius: float
+    avg_roughness: float
+    times: List[float]
+    radii: List[float]
+    roughness: List[float]
+
+
+@dataclass
 class SampleJudgment:
     sample_id: int
     sample_no: str
     judgment: str
     risk_flag: str
     reasons: List[str]
+    baseline_deviation_score: float = 0.0
+    matched_baseline_paper: Optional[str] = None
 
 
 def detect_anomaly_in_series(
@@ -148,6 +178,8 @@ def judge_sample(sample_id: int, reference_samples: Optional[List[int]] = None) 
     reasons: List[str] = []
     judgment_parts: List[str] = []
     risk_flags: List[str] = []
+    baseline_deviation_score = 0.0
+    matched_baseline_paper: Optional[str] = None
 
     slope = _fit_slope(times, radii)
     avg_roughness = statistics.mean(roughness) if roughness else 0.0
@@ -158,6 +190,65 @@ def judge_sample(sample_id: int, reference_samples: Optional[List[int]] = None) 
     if anomaly_ratio >= 0.4:
         reasons.append(f"异常测量点占比 {anomaly_ratio:.0%}")
         risk_flags.append("高风险")
+
+    baseline_anom_count = sum(
+        1 for r in rows if r["anomaly_type"] and "偏离纸型基线" in (r["anomaly_type"] or "")
+    )
+    if baseline_anom_count > 0:
+        baseline_ratio = baseline_anom_count / len(rows)
+        baseline_deviation_score = baseline_ratio * 100
+        matched_baseline_paper = sample_row["paper_type"] if sample_row else None
+        if baseline_ratio >= 0.3:
+            judgment_parts.append("偏离纸型基线")
+            reasons.append(
+                f"偏离纸型「{matched_baseline_paper}」基线 {baseline_anom_count} 个点"
+                f"（占比 {baseline_ratio:.0%}），扩散行为显著偏离同纸型"
+            )
+            risk_flags.append("高风险" if baseline_ratio >= 0.5 else "中风险")
+        elif baseline_ratio >= 0.1:
+            reasons.append(
+                f"部分偏离「{matched_baseline_paper}」纸型基线 {baseline_anom_count} 个点"
+                f"（占比 {baseline_ratio:.0%}）"
+            )
+            risk_flags.append("中风险")
+
+    baseline = None
+    if sample_row:
+        baseline = get_paper_type_baseline(sample_row["paper_type"])
+    if baseline and baseline.avg_slope > 0:
+        matched_baseline_paper = baseline.paper_type
+        slope_bl_ratio = slope / baseline.avg_slope if baseline.avg_slope > 0 else 1.0
+        if slope_bl_ratio > 1.5:
+            if "疑似过浓" not in judgment_parts:
+                judgment_parts.append("偏离纸型基线-过浓")
+            reasons.append(
+                f"渗化斜率为「{baseline.paper_type}」基线的 {slope_bl_ratio:.1f} 倍，扩散过快（纸型对照）"
+            )
+            risk_flags.append("中风险")
+            baseline_deviation_score = max(baseline_deviation_score, abs(slope_bl_ratio - 1) * 50)
+        elif slope_bl_ratio < 0.6:
+            if "疑似过稀" not in judgment_parts:
+                judgment_parts.append("偏离纸型基线-过稀")
+            reasons.append(
+                f"渗化斜率仅为「{baseline.paper_type}」基线的 {slope_bl_ratio:.1f} 倍，扩散过慢（纸型对照）"
+            )
+            risk_flags.append("中风险")
+            baseline_deviation_score = max(baseline_deviation_score, abs(slope_bl_ratio - 1) * 50)
+
+        if baseline.avg_roughness > 0:
+            rough_bl_ratio = avg_roughness / baseline.avg_roughness
+            if rough_bl_ratio > 1.6:
+                judgment_parts.append("偏离纸型基线-纸性异常")
+                reasons.append(
+                    f"毛糙度均值为「{baseline.paper_type}」基线的 {rough_bl_ratio:.1f} 倍（纸型对照）"
+                )
+                risk_flags.append("中风险")
+            elif rough_bl_ratio < 0.5:
+                judgment_parts.append("偏离纸型基线-纸性异常")
+                reasons.append(
+                    f"毛糙度均值仅为「{baseline.paper_type}」基线的 {rough_bl_ratio:.1f} 倍（纸型对照）"
+                )
+                risk_flags.append("中风险")
 
     ref_avg_slope: Optional[float] = None
     ref_avg_radius: Optional[float] = None
@@ -187,15 +278,15 @@ def judge_sample(sample_id: int, reference_samples: Optional[List[int]] = None) 
 
     if ref_avg_slope is not None and ref_avg_slope > 0:
         slope_ratio = slope / ref_avg_slope
-        if slope_ratio > 1.6:
+        if slope_ratio > 1.6 and not any("过浓" in j for j in judgment_parts):
             judgment_parts.append("疑似过浓")
             reasons.append(f"渗化斜率为参考组的 {slope_ratio:.1f} 倍，扩散过快")
             risk_flags.append("中风险")
-        elif slope_ratio < 0.55:
+        elif slope_ratio < 0.55 and not any("过稀" in j for j in judgment_parts):
             judgment_parts.append("疑似过稀")
             reasons.append(f"渗化斜率仅为参考组的 {slope_ratio:.1f} 倍，扩散过慢")
             risk_flags.append("中风险")
-    else:
+    elif not baseline or baseline.avg_slope == 0:
         if slope > 1.2:
             judgment_parts.append("疑似过浓")
             reasons.append(f"渗化斜率={slope:.3f} 偏高，无参考组情况下判定扩散过快")
@@ -205,15 +296,15 @@ def judge_sample(sample_id: int, reference_samples: Optional[List[int]] = None) 
 
     if ref_avg_rough is not None and ref_avg_rough > 0:
         rough_ratio = avg_roughness / ref_avg_rough
-        if rough_ratio > 1.8:
+        if rough_ratio > 1.8 and not any("纸性异常" in j for j in judgment_parts):
             judgment_parts.append("纸性异常")
             reasons.append(f"毛糙度均值为参考组的 {rough_ratio:.1f} 倍，边缘明显偏糙")
             risk_flags.append("中风险")
-        elif rough_ratio < 0.45:
+        elif rough_ratio < 0.45 and not any("纸性异常" in j for j in judgment_parts):
             judgment_parts.append("纸性异常")
             reasons.append(f"毛糙度均值仅为参考组的 {rough_ratio:.1f} 倍，边缘异常光滑")
             risk_flags.append("中风险")
-    else:
+    elif not baseline or baseline.avg_roughness == 0:
         if avg_roughness > 3.5:
             judgment_parts.append("纸性异常(可疑)")
             reasons.append(f"毛糙度均值={avg_roughness:.2f} 偏高")
@@ -221,14 +312,17 @@ def judge_sample(sample_id: int, reference_samples: Optional[List[int]] = None) 
     if ref_avg_radius is not None and ref_avg_radius > 0:
         radius_ratio = max_radius / ref_avg_radius
         if radius_ratio > 1.7:
-            if "疑似过浓" not in judgment_parts:
+            if not any("过浓" in j for j in judgment_parts):
                 judgment_parts.append("疑似过浓")
             reasons.append(f"最大半径为参考组均值的 {radius_ratio:.1f} 倍")
 
     if not judgment_parts:
         judgment_parts.append("正常")
     if not reasons:
-        reasons.append("各项指标在正常范围内")
+        if matched_baseline_paper:
+            reasons.append(f"各项指标在「{matched_baseline_paper}」纸型基线正常范围内")
+        else:
+            reasons.append("各项指标在正常范围内")
 
     final_judgment = " / ".join(dict.fromkeys(judgment_parts))
     if "高风险" in risk_flags:
@@ -238,7 +332,11 @@ def judge_sample(sample_id: int, reference_samples: Optional[List[int]] = None) 
     else:
         final_risk = "正常"
 
-    return SampleJudgment(sample_id, sample_no, final_judgment, final_risk, reasons)
+    return SampleJudgment(
+        sample_id, sample_no, final_judgment, final_risk, reasons,
+        baseline_deviation_score=round(baseline_deviation_score, 1),
+        matched_baseline_paper=matched_baseline_paper
+    )
 
 
 def update_batch_risk_by_anomalies(batch_id: int) -> Tuple[str, int]:
@@ -282,11 +380,11 @@ def update_batch_risk_by_anomalies(batch_id: int) -> Tuple[str, int]:
 
 
 def process_measurement_and_update_risk(sample_id: int) -> Dict:
-    reclassify_measurement_anomalies(sample_id)
+    anom_count = reclassify_with_baseline(sample_id)
     batch_id = db.get_batch_id_of_sample(sample_id)
 
     result = {
-        "anomalies_reclassified": 0,
+        "anomalies_reclassified": anom_count,
         "batch_id": batch_id,
         "batch_risk": None,
         "batch_consecutive": 0,
@@ -305,3 +403,269 @@ def process_measurement_and_update_risk(sample_id: int) -> Dict:
     result["sample_judgment"] = j
 
     return result
+
+
+# ==================== Baseline Matching & Deviation ====================
+
+def _parse_float_list(raw: Optional[str]) -> List[float]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [float(x) for x in parsed]
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    try:
+        return [float(x) for x in raw.split(",") if x.strip()]
+    except (ValueError, TypeError):
+        return []
+
+
+def get_paper_type_baseline(paper_type: str) -> Optional[PaperTypeBaseline]:
+    template = db.get_baseline_template_by_paper(paper_type)
+
+    baseline_sample_rows = db.get_baselines_by_paper_type(paper_type)
+    baseline_sample_ids = [r["id"] for r in baseline_sample_rows]
+
+    if not template and not baseline_sample_rows:
+        return None
+
+    if template:
+        times = _parse_float_list(template["baseline_times"])
+        radii = _parse_float_list(template["baseline_radii"])
+        roughness = _parse_float_list(template["baseline_roughness"])
+        avg_slope = float(template["avg_slope"]) if template["avg_slope"] else 0.0
+        avg_radius = float(template["avg_radius"]) if template["avg_radius"] else 0.0
+        avg_rough = float(template["avg_roughness"]) if template["avg_roughness"] else 0.0
+        template_id = int(template["id"])
+        baseline_sample_id = template["baseline_sample_id"]
+    else:
+        times, radii, roughness = [], [], []
+        avg_slope_list, avg_radius_list, avg_rough_list = [], [], []
+        for bs in baseline_sample_rows:
+            bs_rows = db.get_measurements_by_sample(bs["id"])
+            if len(bs_rows) >= 3:
+                bt = [float(m["adsorb_time"]) for m in bs_rows]
+                br = [float(m["radius"]) for m in bs_rows]
+                bro = [float(m["roughness"]) for m in bs_rows]
+                s_idx = sorted(range(len(bt)), key=lambda i: bt[i])
+                bt = [bt[i] for i in s_idx]
+                br = [br[i] for i in s_idx]
+                bro = [bro[i] for i in s_idx]
+                if not times:
+                    times = bt
+                if not radii:
+                    radii = br
+                if not roughness:
+                    roughness = bro
+                avg_slope_list.append(_fit_slope(bt, br))
+                avg_radius_list.append(statistics.mean(br))
+                avg_rough_list.append(statistics.mean(bro))
+        avg_slope = statistics.mean(avg_slope_list) if avg_slope_list else 0.0
+        avg_radius = statistics.mean(avg_radius_list) if avg_radius_list else 0.0
+        avg_rough = statistics.mean(avg_rough_list) if avg_rough_list else 0.0
+        template_id = None
+        baseline_sample_id = baseline_sample_ids[0] if baseline_sample_ids else None
+
+    return PaperTypeBaseline(
+        paper_type=paper_type,
+        template_id=template_id,
+        baseline_sample_id=baseline_sample_id,
+        sample_ids=baseline_sample_ids,
+        avg_slope=avg_slope,
+        avg_radius=avg_radius,
+        avg_roughness=avg_rough,
+        times=times,
+        radii=radii,
+        roughness=roughness,
+    )
+
+
+def _interpolate_baseline_value(times: List[float], values: List[float], t: float) -> Optional[float]:
+    if not times or not values or len(times) != len(values):
+        return None
+    if t <= times[0]:
+        return values[0]
+    if t >= times[-1]:
+        return values[-1]
+    for i in range(len(times) - 1):
+        t0, t1 = times[i], times[i + 1]
+        v0, v1 = values[i], values[i + 1]
+        if t0 <= t <= t1:
+            if t1 == t0:
+                return v0
+            ratio = (t - t0) / (t1 - t0)
+            return v0 + ratio * (v1 - v0)
+    return values[-1]
+
+
+def compute_baseline_deviations(
+    sample_times: List[float],
+    sample_radii: List[float],
+    sample_roughness: List[float],
+    baseline: PaperTypeBaseline
+) -> List[BaselineDeviation]:
+    deviations: List[BaselineDeviation] = []
+    for i, t in enumerate(sample_times):
+        bl_r = _interpolate_baseline_value(baseline.times, baseline.radii, t)
+        bl_ro = _interpolate_baseline_value(baseline.times, baseline.roughness, t)
+        if bl_r is None:
+            continue
+        r = sample_radii[i]
+        ro = sample_roughness[i] if i < len(sample_roughness) else 0.0
+        diff = r - bl_r
+        diff_pct = (diff / bl_r * 100.0) if bl_r != 0 else 0.0
+        rough_diff = ro - (bl_ro if bl_ro is not None else 0.0)
+        rough_bl = bl_ro if bl_ro is not None else 0.0
+        rough_diff_pct = (rough_diff / rough_bl * 100.0) if rough_bl != 0 else 0.0
+        deviations.append(BaselineDeviation(
+            time=t,
+            sample_radius=r,
+            baseline_radius=bl_r,
+            diff=diff,
+            diff_pct=diff_pct,
+            sample_roughness=ro,
+            baseline_roughness=rough_bl,
+            rough_diff=rough_diff,
+            rough_diff_pct=rough_diff_pct,
+        ))
+    return deviations
+
+
+def detect_baseline_deviation_anomalies(
+    sample_id: int,
+    threshold_pct: float = 20.0
+) -> List[Tuple[int, AnomalyResult]]:
+    rows = db.get_measurements_by_sample(sample_id)
+    if len(rows) < 3:
+        return []
+
+    sample = db.get_sample_by_id(sample_id)
+    if not sample:
+        return []
+
+    baseline = get_paper_type_baseline(sample["paper_type"])
+    if not baseline or not baseline.times:
+        return []
+
+    sample_times = [float(r["adsorb_time"]) for r in rows]
+    sample_radii = [float(r["radius"]) for r in rows]
+    sample_rough = [float(r["roughness"]) for r in rows]
+
+    deviations = compute_baseline_deviations(sample_times, sample_radii, sample_rough, baseline)
+
+    results: List[Tuple[int, AnomalyResult]] = []
+    for i, dev in enumerate(deviations):
+        row = rows[i]
+        abs_pct = abs(dev.diff_pct)
+        abs_rough_pct = abs(dev.rough_diff_pct)
+
+        if abs_pct >= threshold_pct:
+            direction = "偏大" if dev.diff > 0 else "偏小"
+            anomaly = AnomalyResult(
+                True,
+                f"偏离纸型基线-半径{direction}",
+                (f"时间 {dev.time:.1f}s，与「{baseline.paper_type}」基线偏差 "
+                 f"{dev.diff_pct:+.1f}%（{dev.diff:+.2f}mm），超过阈值 {threshold_pct}%")
+            )
+            results.append((row["id"], anomaly))
+        elif abs_rough_pct >= threshold_pct * 1.5:
+            direction = "偏糙" if dev.rough_diff > 0 else "偏光滑"
+            anomaly = AnomalyResult(
+                True,
+                f"偏离纸型基线-毛糙度{direction}",
+                (f"时间 {dev.time:.1f}s，与「{baseline.paper_type}」基线毛糙度偏差 "
+                 f"{dev.rough_diff_pct:+.1f}%，超过阈值 {threshold_pct * 1.5}%")
+            )
+            results.append((row["id"], anomaly))
+
+    return results
+
+
+def build_baseline_from_sample(sample_id: int, remark: str = "") -> Optional[PaperTypeBaseline]:
+    sample = db.get_sample_by_id(sample_id)
+    if not sample:
+        return None
+
+    rows = db.get_measurements_by_sample(sample_id)
+    if len(rows) < 3:
+        return None
+
+    times = [float(r["adsorb_time"]) for r in rows]
+    radii = [float(r["radius"]) for r in rows]
+    roughness = [float(r["roughness"]) for r in rows]
+    s_idx = sorted(range(len(times)), key=lambda i: times[i])
+    times = [times[i] for i in s_idx]
+    radii = [radii[i] for i in s_idx]
+    roughness = [roughness[i] for i in s_idx]
+
+    avg_slope = _fit_slope(times, radii)
+    avg_radius = statistics.mean(radii)
+    avg_rough = statistics.mean(roughness)
+
+    times_json = json.dumps(times, ensure_ascii=False)
+    radii_json = json.dumps(radii, ensure_ascii=False)
+    rough_json = json.dumps(roughness, ensure_ascii=False)
+
+    existing = db.get_baseline_template_by_paper(sample["paper_type"])
+    if existing:
+        db.update_baseline_template(
+            existing["id"], sample_id, avg_slope, avg_radius, avg_rough,
+            times_json, radii_json, rough_json, remark
+        )
+    else:
+        db.create_baseline_template(
+            sample["paper_type"], sample_id, avg_slope, avg_radius, avg_rough,
+            times_json, radii_json, rough_json, remark
+        )
+
+    db.set_sample_baseline(sample_id, 1)
+
+    return PaperTypeBaseline(
+        paper_type=sample["paper_type"],
+        template_id=None,
+        baseline_sample_id=sample_id,
+        sample_ids=[sample_id],
+        avg_slope=avg_slope,
+        avg_radius=avg_radius,
+        avg_roughness=avg_rough,
+        times=times,
+        radii=radii,
+        roughness=roughness,
+    )
+
+
+def reclassify_with_baseline(sample_id: int) -> int:
+    baseline_anoms = detect_baseline_deviation_anomalies(sample_id)
+    series_anoms = analyze_sample_anomalies(sample_id)
+
+    anom_map: Dict[int, AnomalyResult] = {}
+    for mid, ar in series_anoms:
+        anom_map[mid] = ar
+    for mid, ar in baseline_anoms:
+        if mid in anom_map:
+            existing = anom_map[mid]
+            combined = AnomalyResult(
+                True,
+                f"{existing.anomaly_type}; {ar.anomaly_type}",
+                f"{existing.details}; {ar.details}"
+            )
+            anom_map[mid] = combined
+        else:
+            anom_map[mid] = ar
+
+    count = 0
+    with db.get_connection() as conn:
+        conn.execute(
+            "UPDATE measurements SET is_anomaly = 0, anomaly_type = NULL WHERE sample_id = ?",
+            (sample_id,)
+        )
+        for mid, ar in anom_map.items():
+            conn.execute(
+                "UPDATE measurements SET is_anomaly = ?, anomaly_type = ? WHERE id = ?",
+                (1 if ar.is_anomaly else 0, ar.anomaly_type, mid)
+            )
+            if ar.is_anomaly:
+                count += 1
+    return count

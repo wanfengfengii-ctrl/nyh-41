@@ -47,9 +47,28 @@ def init_db() -> None:
                 ink_date TEXT NOT NULL,
                 risk_flag TEXT NOT NULL DEFAULT '正常',
                 judgment TEXT,
+                is_baseline INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE SET NULL
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS baseline_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                paper_type TEXT UNIQUE NOT NULL,
+                baseline_sample_id INTEGER,
+                avg_slope REAL,
+                avg_radius REAL,
+                avg_roughness REAL,
+                baseline_times TEXT,
+                baseline_radii TEXT,
+                baseline_roughness TEXT,
+                remark TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (baseline_sample_id) REFERENCES samples(id) ON DELETE SET NULL
             )
         """)
 
@@ -80,8 +99,14 @@ def init_db() -> None:
         """)
 
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_samples_batch ON samples(batch_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_samples_paper ON samples(paper_type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_measurements_sample ON measurements(sample_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_measurements_time ON measurements(adsorb_time)")
+
+        try:
+            cursor.execute("ALTER TABLE samples ADD COLUMN is_baseline INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
 
 
 def now_str() -> str:
@@ -155,15 +180,15 @@ def sample_no_exists(sample_no: str) -> bool:
 
 
 def create_sample(sample_no: str, paper_type: str, ink_date: str,
-                  batch_id: Optional[int] = None) -> int:
+                  batch_id: Optional[int] = None, is_baseline: int = 0) -> int:
     with get_connection() as conn:
         cursor = conn.cursor()
         t = now_str()
         cursor.execute(
             """INSERT INTO samples
-               (sample_no, batch_id, paper_type, ink_date, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (sample_no, batch_id, paper_type, ink_date, t, t)
+               (sample_no, batch_id, paper_type, ink_date, is_baseline, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (sample_no, batch_id, paper_type, ink_date, is_baseline, t, t)
         )
         return cursor.lastrowid
 
@@ -294,3 +319,174 @@ def get_import_failures(limit: int = 500) -> List[sqlite3.Row]:
 def clear_import_failures() -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM import_failures")
+
+
+# ==================== Baseline Templates ====================
+
+def set_sample_baseline(sample_id: int, is_baseline: int) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE samples SET is_baseline = ?, updated_at = ? WHERE id = ?",
+            (1 if is_baseline else 0, now_str(), sample_id)
+        )
+
+
+def get_baselines_by_paper_type(paper_type: str) -> List[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute("""
+            SELECT s.*, b.batch_code FROM samples s
+            LEFT JOIN batches b ON s.batch_id = b.id
+            WHERE s.paper_type = ? AND s.is_baseline = 1
+            ORDER BY s.created_at DESC
+        """, (paper_type,)).fetchall()
+
+
+def get_all_paper_types() -> List[str]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT paper_type FROM samples ORDER BY paper_type"
+        ).fetchall()
+        return [r["paper_type"] for r in rows]
+
+
+def get_samples_by_paper_type(paper_type: str) -> List[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute("""
+            SELECT s.*, b.batch_code FROM samples s
+            LEFT JOIN batches b ON s.batch_id = b.id
+            WHERE s.paper_type = ?
+            ORDER BY s.created_at DESC
+        """, (paper_type,)).fetchall()
+
+
+def create_baseline_template(
+    paper_type: str,
+    baseline_sample_id: Optional[int],
+    avg_slope: float,
+    avg_radius: float,
+    avg_roughness: float,
+    baseline_times: str,
+    baseline_radii: str,
+    baseline_roughness: str,
+    remark: str = ""
+) -> int:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        t = now_str()
+        cursor.execute(
+            """INSERT INTO baseline_templates
+               (paper_type, baseline_sample_id, avg_slope, avg_radius, avg_roughness,
+                baseline_times, baseline_radii, baseline_roughness, remark, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (paper_type, baseline_sample_id, avg_slope, avg_radius, avg_roughness,
+             baseline_times, baseline_radii, baseline_roughness, remark, t, t)
+        )
+        return cursor.lastrowid
+
+
+def update_baseline_template(
+    template_id: int,
+    baseline_sample_id: Optional[int],
+    avg_slope: float,
+    avg_radius: float,
+    avg_roughness: float,
+    baseline_times: str,
+    baseline_radii: str,
+    baseline_roughness: str,
+    remark: str = ""
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE baseline_templates
+               SET baseline_sample_id = ?, avg_slope = ?, avg_radius = ?, avg_roughness = ?,
+                   baseline_times = ?, baseline_radii = ?, baseline_roughness = ?,
+                   remark = ?, updated_at = ?
+               WHERE id = ?""",
+            (baseline_sample_id, avg_slope, avg_radius, avg_roughness,
+             baseline_times, baseline_radii, baseline_roughness, remark, now_str(), template_id)
+        )
+
+
+def get_baseline_template_by_paper(paper_type: str) -> Optional[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM baseline_templates WHERE paper_type = ?",
+            (paper_type,)
+        ).fetchone()
+
+
+def get_all_baseline_templates() -> List[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT bt.*, s.sample_no FROM baseline_templates bt "
+            "LEFT JOIN samples s ON bt.baseline_sample_id = s.id "
+            "ORDER BY bt.paper_type ASC"
+        ).fetchall()
+
+
+def delete_baseline_template(template_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("DELETE FROM baseline_templates WHERE id = ?", (template_id,))
+
+
+def get_risk_aggregated_by_paper(batch_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    with get_connection() as conn:
+        if batch_id is not None:
+            rows = conn.execute("""
+                SELECT
+                    s.paper_type AS paper_type,
+                    COUNT(*) AS total_samples,
+                    SUM(CASE WHEN s.risk_flag = '高风险' THEN 1 ELSE 0 END) AS high_risk,
+                    SUM(CASE WHEN s.risk_flag = '中风险' THEN 1 ELSE 0 END) AS mid_risk,
+                    SUM(CASE WHEN s.risk_flag = '低风险' THEN 1 ELSE 0 END) AS low_risk,
+                    SUM(CASE WHEN s.risk_flag = '正常' THEN 1 ELSE 0 END) AS normal,
+                    SUM(CASE WHEN s.is_baseline = 1 THEN 1 ELSE 0 END) AS baseline_count
+                FROM samples s
+                WHERE s.batch_id = ?
+                GROUP BY s.paper_type
+                ORDER BY s.paper_type ASC
+            """, (batch_id,)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT
+                    s.paper_type AS paper_type,
+                    COUNT(*) AS total_samples,
+                    SUM(CASE WHEN s.risk_flag = '高风险' THEN 1 ELSE 0 END) AS high_risk,
+                    SUM(CASE WHEN s.risk_flag = '中风险' THEN 1 ELSE 0 END) AS mid_risk,
+                    SUM(CASE WHEN s.risk_flag = '低风险' THEN 1 ELSE 0 END) AS low_risk,
+                    SUM(CASE WHEN s.risk_flag = '正常' THEN 1 ELSE 0 END) AS normal,
+                    SUM(CASE WHEN s.is_baseline = 1 THEN 1 ELSE 0 END) AS baseline_count
+                FROM samples s
+                GROUP BY s.paper_type
+                ORDER BY s.paper_type ASC
+            """).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_paper_type_risk_summary() -> List[Dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT
+                s.paper_type AS paper_type,
+                COUNT(*) AS total_samples,
+                SUM(CASE WHEN s.risk_flag = '高风险' THEN 1 ELSE 0 END) AS high_risk,
+                SUM(CASE WHEN s.risk_flag = '中风险' THEN 1 ELSE 0 END) AS mid_risk,
+                SUM(CASE WHEN s.risk_flag = '低风险' THEN 1 ELSE 0 END) AS low_risk,
+                SUM(CASE WHEN s.risk_flag = '正常' THEN 1 ELSE 0 END) AS normal,
+                SUM(CASE WHEN s.is_baseline = 1 THEN 1 ELSE 0 END) AS baseline_count,
+                ROUND(100.0 * SUM(CASE WHEN s.risk_flag != '正常' THEN 1 ELSE 0 END) /
+                      NULLIF(COUNT(*), 0), 1) AS anomaly_rate_pct
+            FROM samples s
+            GROUP BY s.paper_type
+            ORDER BY anomaly_rate_pct DESC, paper_type ASC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_baseline_matched_sample_ids(sample_id: int) -> List[int]:
+    sample = get_sample_by_id(sample_id)
+    if not sample:
+        return []
+    paper_type = sample["paper_type"]
+    baselines = get_baselines_by_paper_type(paper_type)
+    return [b["id"] for b in baselines if b["id"] != sample_id]

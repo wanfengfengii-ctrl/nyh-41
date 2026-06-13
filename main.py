@@ -24,7 +24,7 @@ pg.setConfigOptions(antialias=True, background='w', foreground='k')
 
 
 class SampleTableModel(QAbstractTableModel):
-    HEADERS = ["编号", "试样编号", "纸张类型", "点墨日期", "批次", "风险", "判断", "创建时间"]
+    HEADERS = ["编号", "试样编号", "纸张类型", "点墨日期", "批次", "基线", "风险", "判断", "创建时间"]
 
     def __init__(self, data: Optional[List] = None):
         super().__init__()
@@ -65,21 +65,31 @@ class SampleTableModel(QAbstractTableModel):
             elif col == 4:
                 return row["batch_code"] if row["batch_code"] else "-"
             elif col == 5:
-                return row["risk_flag"]
+                return "★ 基线" if row.get("is_baseline", 0) else "-"
             elif col == 6:
-                return row["judgment"] if row["judgment"] else "-"
+                return row["risk_flag"]
             elif col == 7:
+                return row["judgment"] if row["judgment"] else "-"
+            elif col == 8:
                 return row["created_at"]
 
-        if role == Qt.ForegroundRole and col == 5:
-            risk = row["risk_flag"]
-            if risk == "高风险":
-                return QColor("#c0392b")
-            elif risk == "中风险":
-                return QColor("#e67e22")
-            elif risk == "低风险":
-                return QColor("#f1c40f")
-            return QColor("#27ae60")
+        if role == Qt.ForegroundRole:
+            if col == 5 and row.get("is_baseline", 0):
+                return QColor("#2980b9")
+            if col == 6:
+                risk = row["risk_flag"]
+                if risk == "高风险":
+                    return QColor("#c0392b")
+                elif risk == "中风险":
+                    return QColor("#e67e22")
+                elif risk == "低风险":
+                    return QColor("#f1c40f")
+                return QColor("#27ae60")
+
+        if role == Qt.FontRole and col == 5 and row.get("is_baseline", 0):
+            f = QFont()
+            f.setBold(True)
+            return f
 
         return None
 
@@ -241,6 +251,7 @@ class SampleManagementTab(QWidget):
         super().__init__()
         self._init_ui()
         self._load_samples()
+        self._refresh_paper_types()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -251,8 +262,10 @@ class SampleManagementTab(QWidget):
         self.sample_no_edit = QLineEdit()
         self.sample_no_edit.setPlaceholderText("请输入试样编号（必须唯一）")
 
-        self.paper_type_edit = QLineEdit()
-        self.paper_type_edit.setPlaceholderText("如：宣纸、毛边纸、皮纸")
+        self.paper_type_combo = QComboBox()
+        self.paper_type_combo.setEditable(True)
+        self.paper_type_combo.setPlaceholderText("选择或输入纸型，如：宣纸、毛边纸、皮纸")
+        self.paper_type_combo.currentTextChanged.connect(self._on_paper_type_changed)
 
         self.ink_date_edit = QDateEdit()
         self.ink_date_edit.setCalendarPopup(True)
@@ -262,10 +275,18 @@ class SampleManagementTab(QWidget):
         self.batch_code_edit = QLineEdit()
         self.batch_code_edit.setPlaceholderText("可选，批次号将自动关联")
 
+        self.is_baseline_cb = QCheckBox("设为该纸型基线试样（自动生成基线模板）")
+
+        self.baseline_hint_label = QLabel()
+        self.baseline_hint_label.setStyleSheet("color: #2980b9; font-size: 12px; padding: 4px;")
+        self.baseline_hint_label.setWordWrap(True)
+
         form_layout.addRow("试样编号 *", self.sample_no_edit)
-        form_layout.addRow("纸张类型 *", self.paper_type_edit)
+        form_layout.addRow("纸张类型 *", self.paper_type_combo)
         form_layout.addRow("点墨日期 *", self.ink_date_edit)
         form_layout.addRow("批次号", self.batch_code_edit)
+        form_layout.addRow("", self.is_baseline_cb)
+        form_layout.addRow("", self.baseline_hint_label)
 
         btn_layout = QHBoxLayout()
         self.add_btn = QPushButton("添加试样")
@@ -288,6 +309,7 @@ class SampleManagementTab(QWidget):
         self.sample_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.sample_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.sample_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.sample_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
 
         self.sample_model = SampleTableModel()
         self.filter_proxy = QSortFilterProxyModel()
@@ -308,25 +330,66 @@ class SampleManagementTab(QWidget):
         btn_row = QHBoxLayout()
         self.delete_btn = QPushButton("删除选中试样")
         self.delete_btn.clicked.connect(self._delete_sample)
+        self.set_baseline_btn = QPushButton("★ 设为纸型基线")
+        self.set_baseline_btn.clicked.connect(self._set_selected_as_baseline)
+        self.unset_baseline_btn = QPushButton("取消基线标记")
+        self.unset_baseline_btn.clicked.connect(self._unset_selected_baseline)
         self.refresh_btn = QPushButton("刷新")
         self.refresh_btn.clicked.connect(self._load_samples)
         btn_row.addWidget(self.delete_btn)
+        btn_row.addWidget(self.set_baseline_btn)
+        btn_row.addWidget(self.unset_baseline_btn)
         btn_row.addStretch()
         btn_row.addWidget(self.refresh_btn)
         list_layout.addLayout(btn_row)
 
         main_layout.addWidget(list_group, 1)
 
+    def _refresh_paper_types(self):
+        current_text = self.paper_type_combo.currentText()
+        self.paper_type_combo.blockSignals(True)
+        self.paper_type_combo.clear()
+        paper_types = db.get_all_paper_types()
+        self.paper_type_combo.addItems(paper_types)
+        self.paper_type_combo.setCurrentText(current_text)
+        self.paper_type_combo.blockSignals(False)
+        self._on_paper_type_changed(current_text)
+
+    def _on_paper_type_changed(self, text):
+        pt = text.strip()
+        if not pt:
+            self.baseline_hint_label.setText("")
+            return
+        template = db.get_baseline_template_by_paper(pt)
+        baselines = db.get_baselines_by_paper_type(pt)
+        if template and baselines:
+            sample_row = db.get_sample_by_id(template["baseline_sample_id"]) if template["baseline_sample_id"] else None
+            sample_no = sample_row["sample_no"] if sample_row else "-"
+            self.baseline_hint_label.setText(
+                f"✓ 纸型「{pt}」已有基线模板（来源试样：{sample_no}，共 {len(baselines)} 个基线试样）。"
+                f"新增试样将自动匹配此基线进行对照分析。"
+            )
+        elif baselines:
+            self.baseline_hint_label.setText(
+                f"△ 纸型「{pt}」有 {len(baselines)} 个基线试样，建议创建基线模板以获得更稳定的对照。"
+            )
+        else:
+            self.baseline_hint_label.setText(
+                f"△ 纸型「{pt}」尚未建立基线模板，建议勾选「设为该纸型基线试样」或后续标记一个典型试样作为基线。"
+            )
+
     def _load_samples(self):
         samples = db.get_all_samples()
         self.sample_model.update_data(samples)
+        self._refresh_paper_types()
         self.data_updated.emit()
 
     def _add_sample(self):
         sample_no = self.sample_no_edit.text().strip()
-        paper_type = self.paper_type_edit.text().strip()
+        paper_type = self.paper_type_combo.currentText().strip()
         ink_date = self.ink_date_edit.date().toString("yyyy-MM-dd")
         batch_code = self.batch_code_edit.text().strip() or None
+        is_baseline = 1 if self.is_baseline_cb.isChecked() else 0
 
         sd = models.SampleData(
             sample_no=sample_no,
@@ -353,8 +416,20 @@ class SampleManagementTab(QWidget):
                     return
 
         try:
-            db.create_sample(sample_no, paper_type, ink_date, batch_id)
-            QMessageBox.information(self, "成功", f"试样 {sample_no} 添加成功！")
+            new_id = db.create_sample(sample_no, paper_type, ink_date, batch_id, is_baseline=is_baseline)
+            msg = f"试样 {sample_no} 添加成功！"
+            if is_baseline:
+                try:
+                    bl = anomaly_detection.build_baseline_from_sample(new_id)
+                    if bl:
+                        msg += "\n已根据该试样创建基线模板（待录入测量数据后自动生效）。"
+                except Exception:
+                    msg += "\n基线模板创建将在录入测量数据后进行。"
+            else:
+                baseline = anomaly_detection.get_paper_type_baseline(paper_type)
+                if baseline:
+                    msg += f"\n已自动匹配纸型「{paper_type}」基线模板，录入测量数据后将进行对照分析。"
+            QMessageBox.information(self, "成功", msg)
             self._clear_form()
             self._load_samples()
         except Exception as e:
@@ -362,18 +437,82 @@ class SampleManagementTab(QWidget):
 
     def _clear_form(self):
         self.sample_no_edit.clear()
-        self.paper_type_edit.clear()
+        self.paper_type_combo.setCurrentText("")
         self.ink_date_edit.setDate(datetime.now())
         self.batch_code_edit.clear()
+        self.is_baseline_cb.setChecked(False)
 
-    def _delete_sample(self):
+    def _get_selected_sample(self):
         proxy_idx = self.sample_table.currentIndex()
         if not proxy_idx.isValid():
+            return None
+        source_idx = self.filter_proxy.mapToSource(proxy_idx)
+        return self.sample_model._data[source_idx.row()]
+
+    def _set_selected_as_baseline(self):
+        row = self._get_selected_sample()
+        if not row:
             QMessageBox.information(self, "提示", "请先选择一个试样")
             return
+        sample_id = row["id"]
+        sample_no = row["sample_no"]
+        paper_type = row["paper_type"]
 
-        source_idx = self.filter_proxy.mapToSource(proxy_idx)
-        row = self.sample_model._data[source_idx.row()]
+        measurements = db.get_measurements_by_sample(sample_id)
+        if len(measurements) < 3:
+            reply = QMessageBox.question(
+                self, "测量数据不足",
+                f"试样 '{sample_no}' 仅有 {len(measurements)} 个测量点，建议至少 3 个点。\n仍要设为基线吗？",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        try:
+            bl = anomaly_detection.build_baseline_from_sample(sample_id)
+            if bl:
+                QMessageBox.information(
+                    self, "成功",
+                    f"已将 '{sample_no}' 设为「{paper_type}」纸型基线，并生成基线模板！\n"
+                    f"后续同纸型试样将自动匹配该基线进行对照分析。"
+                )
+                self._load_samples()
+                self.data_updated.emit()
+            else:
+                QMessageBox.warning(self, "失败", "基线模板构建失败，请检查测量数据")
+        except Exception as e:
+            QMessageBox.warning(self, "失败", str(e))
+
+    def _unset_selected_baseline(self):
+        row = self._get_selected_sample()
+        if not row:
+            QMessageBox.information(self, "提示", "请先选择一个试样")
+            return
+        if not row.get("is_baseline", 0):
+            QMessageBox.information(self, "提示", "该试样当前不是基线试样")
+            return
+        sample_id = row["id"]
+        sample_no = row["sample_no"]
+        reply = QMessageBox.question(
+            self, "确认",
+            f"确定要取消试样 '{sample_no}' 的基线标记吗？\n（纸型基线模板若来源为本试样，建议重新设定新的基线）",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            db.set_sample_baseline(sample_id, 0)
+            self._load_samples()
+            self.data_updated.emit()
+            QMessageBox.information(self, "成功", "已取消基线标记")
+        except Exception as e:
+            QMessageBox.warning(self, "失败", str(e))
+
+    def _delete_sample(self):
+        row = self._get_selected_sample()
+        if not row:
+            QMessageBox.information(self, "提示", "请先选择一个试样")
+            return
         sample_id = row["id"]
         sample_no = row["sample_no"]
 
@@ -747,7 +886,7 @@ class ComparisonTab(QWidget):
 
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_panel.setMaximumWidth(300)
+        left_panel.setMaximumWidth(310)
 
         list_group = QGroupBox("选择试样对比")
         list_layout = QVBoxLayout(list_group)
@@ -790,10 +929,30 @@ class ComparisonTab(QWidget):
         self.show_details_cb.setChecked(True)
         self.show_details_cb.stateChanged.connect(self._on_details_toggled)
 
+        self.auto_baseline_cb = QCheckBox("自动叠加同纸型基线（虚线）")
+        self.auto_baseline_cb.setChecked(True)
+        self.auto_baseline_cb.stateChanged.connect(self._update_plot)
+
+        self.show_deviation_cb = QCheckBox("显示「与基线偏差」叠加视图")
+        self.show_deviation_cb.setChecked(True)
+        self.show_deviation_cb.stateChanged.connect(self._on_deviation_toggled)
+
+        self.deviation_mode_combo = QComboBox()
+        self.deviation_mode_combo.addItem("绝对偏差 (mm)", "abs")
+        self.deviation_mode_combo.addItem("相对偏差 (%)", "pct")
+        self.deviation_mode_combo.currentIndexChanged.connect(self._update_deviation_plot)
+
         options_layout.addWidget(self.show_anomaly_cb)
         options_layout.addWidget(self.show_legend_cb)
         options_layout.addWidget(self.show_grid_cb)
         options_layout.addWidget(self.show_details_cb)
+        options_layout.addSpacing(6)
+        options_layout.addWidget(self.auto_baseline_cb)
+        options_layout.addWidget(self.show_deviation_cb)
+        dev_layout = QHBoxLayout()
+        dev_layout.addWidget(QLabel("偏差模式:"))
+        dev_layout.addWidget(self.deviation_mode_combo)
+        options_layout.addLayout(dev_layout)
 
         left_layout.addWidget(options_group)
         left_layout.addStretch()
@@ -804,7 +963,9 @@ class ComparisonTab(QWidget):
 
         self.right_splitter = QSplitter(Qt.Vertical)
 
-        merge_group = QGroupBox("合并渗化曲线")
+        self.curves_splitter = QSplitter(Qt.Vertical)
+
+        merge_group = QGroupBox("合并渗化曲线（可叠加同纸型基线）")
         merge_layout = QVBoxLayout(merge_group)
 
         self.plot_widget = pg.PlotWidget()
@@ -818,7 +979,24 @@ class ComparisonTab(QWidget):
             self.plot_widget.addLegend()
 
         merge_layout.addWidget(self.plot_widget)
-        self.right_splitter.addWidget(merge_group)
+        self.curves_splitter.addWidget(merge_group)
+
+        self.deviation_group = QGroupBox("与基线偏差叠加视图（正值=大于基线，负值=小于基线）")
+        deviation_layout = QVBoxLayout(self.deviation_group)
+
+        self.deviation_plot = pg.PlotWidget()
+        self.deviation_plot.setLabel('bottom', '吸附时间', units='s')
+        self.deviation_plot.setTitle("与纸型基线偏差")
+        self.deviation_plot.showGrid(x=True, y=True)
+        self.deviation_plot.setMouseEnabled(x=True, y=True)
+        self.deviation_plot.addLegend()
+
+        deviation_layout.addWidget(self.deviation_plot)
+        self.curves_splitter.addWidget(self.deviation_group)
+        self.curves_splitter.setStretchFactor(0, 3)
+        self.curves_splitter.setStretchFactor(1, 2)
+
+        self.right_splitter.addWidget(self.curves_splitter)
 
         self.detail_group = QGroupBox("试样并排明细")
         detail_layout = QVBoxLayout(self.detail_group)
@@ -836,7 +1014,7 @@ class ComparisonTab(QWidget):
         detail_layout.addWidget(self.detail_scroll)
 
         self.right_splitter.addWidget(self.detail_group)
-        self.right_splitter.setStretchFactor(0, 3)
+        self.right_splitter.setStretchFactor(0, 4)
         self.right_splitter.setStretchFactor(1, 2)
 
         right_layout.addWidget(self.right_splitter)
@@ -847,11 +1025,14 @@ class ComparisonTab(QWidget):
         splitter.setStretchFactor(1, 5)
         main_layout.addWidget(splitter)
 
+        self._on_deviation_toggled()
+
     def _load_samples(self):
         self.sample_list.clear()
         self._plot_curves.clear()
         self._plot_scatters.clear()
         self.plot_widget.clear()
+        self.deviation_plot.clear()
         self._clear_detail_cards()
 
         samples = db.get_all_samples()
@@ -862,10 +1043,15 @@ class ComparisonTab(QWidget):
                   '#ff9800', '#8bc34a', '#ff5722', '#607d8b', '#795548']
 
         for i, s in enumerate(samples):
-            item = QListWidgetItem(f"{s['sample_no']} ({s['paper_type']})")
+            mark = " ★" if s.get("is_baseline", 0) else ""
+            item = QListWidgetItem(f"{s['sample_no']} ({s['paper_type']}){mark}")
             item.setData(Qt.UserRole, s["id"])
             color = QColor(colors[i % len(colors)])
             item.setData(Qt.ForegroundRole, color)
+            if s.get("is_baseline", 0):
+                f = item.font()
+                f.setBold(True)
+                item.setFont(f)
             self.sample_list.addItem(item)
             self._plot_curves[s["id"]] = color
 
@@ -889,9 +1075,16 @@ class ComparisonTab(QWidget):
     def _on_grid_changed(self):
         show = self.show_grid_cb.isChecked()
         self.plot_widget.showGrid(x=show, y=show)
+        self.deviation_plot.showGrid(x=show, y=show)
 
     def _on_details_toggled(self):
         self.detail_group.setVisible(self.show_details_cb.isChecked())
+
+    def _on_deviation_toggled(self):
+        show = self.show_deviation_cb.isChecked()
+        self.deviation_group.setVisible(show)
+        if show:
+            self._update_deviation_plot()
 
     def _update_details(self):
         self._clear_detail_cards()
@@ -920,15 +1113,43 @@ class ComparisonTab(QWidget):
 
         self.detail_scroll_layout.addStretch()
 
+    def _collect_baselines_for_plot(self):
+        baseline_map = {}
+        if not self.auto_baseline_cb.isChecked():
+            return baseline_map
+        paper_types_in_selection = set()
+        for sid in self._selected_ids:
+            s = self._all_samples.get(sid)
+            if s:
+                paper_types_in_selection.add(s["paper_type"])
+        for pt in paper_types_in_selection:
+            bl = anomaly_detection.get_paper_type_baseline(pt)
+            if bl and bl.times:
+                baseline_map[pt] = bl
+        return baseline_map
+
     def _update_plot(self):
         self.plot_widget.clear()
         if self.show_legend_cb.isChecked():
             self.plot_widget.addLegend()
 
-        if not self._selected_ids:
+        if not self._selected_ids and not self.auto_baseline_cb.isChecked():
+            self._update_deviation_plot()
             return
 
         all_measurements = db.get_measurements_by_samples(self._selected_ids)
+
+        baseline_map = self._collect_baselines_for_plot()
+        for pt, bl in baseline_map.items():
+            bl_times = np.array(bl.times, dtype=float)
+            bl_radii = np.array(bl.radii, dtype=float)
+            baseline_pen = pg.mkPen(color='#2c3e50', width=3, style=Qt.DashLine)
+            self.plot_widget.plot(
+                bl_times, bl_radii,
+                pen=baseline_pen,
+                name=f"[基线] {pt}",
+                symbol=None
+            )
 
         for sid in self._selected_ids:
             sample = self._all_samples.get(sid)
@@ -948,9 +1169,10 @@ class ComparisonTab(QWidget):
             radii = radii[sort_idx]
             measurements_sorted = [measurements[i] for i in sort_idx]
 
+            line_width = 3 if sample.get("is_baseline", 0) else 2
             self.plot_widget.plot(
                 times, radii,
-                pen=pg.mkPen(color=color, width=2),
+                pen=pg.mkPen(color=color, width=line_width),
                 name=sample["sample_no"],
                 symbol=None
             )
@@ -1001,6 +1223,101 @@ class ComparisonTab(QWidget):
                     symbolPen=color,
                     name=f"{sample['sample_no']} 数据点"
                 )
+
+        self._update_deviation_plot()
+
+    def _update_deviation_plot(self):
+        self.deviation_plot.clear()
+        if not self.show_deviation_cb.isChecked():
+            return
+        if not self._selected_ids:
+            return
+
+        mode = self.deviation_mode_combo.currentData()
+        self.deviation_plot.setLabel(
+            'left',
+            '偏差 (mm)' if mode == "abs" else '偏差 (%)'
+        )
+        self.deviation_plot.setTitle(
+            f"与纸型基线偏差 - {'绝对偏差' if mode == 'abs' else '相对偏差'}"
+        )
+
+        all_measurements = db.get_measurements_by_samples(self._selected_ids)
+        threshold_line = None
+
+        for sid in self._selected_ids:
+            sample = self._all_samples.get(sid)
+            if not sample:
+                continue
+            bl = anomaly_detection.get_paper_type_baseline(sample["paper_type"])
+            if not bl or not bl.times:
+                continue
+            measurements = all_measurements.get(sid, [])
+            if not measurements:
+                continue
+
+            sample_times = [float(m["adsorb_time"]) for m in measurements]
+            sample_radii = [float(m["radius"]) for m in measurements]
+            sample_rough = [float(m["roughness"]) for m in measurements]
+
+            devs = anomaly_detection.compute_baseline_deviations(
+                sample_times, sample_radii, sample_rough, bl
+            )
+            if not devs:
+                continue
+
+            color = self._plot_curves[sid]
+            times_arr = np.array([d.time for d in devs], dtype=float)
+            if mode == "abs":
+                values_arr = np.array([d.diff for d in devs], dtype=float)
+            else:
+                values_arr = np.array([d.diff_pct for d in devs], dtype=float)
+
+            sort_idx = np.argsort(times_arr)
+            times_arr = times_arr[sort_idx]
+            values_arr = values_arr[sort_idx]
+
+            self.deviation_plot.plot(
+                times_arr, values_arr,
+                pen=pg.mkPen(color=color, width=2),
+                name=sample["sample_no"],
+                symbol='o',
+                symbolSize=6,
+                symbolBrush=color,
+                symbolPen=color
+            )
+
+            if threshold_line is None:
+                if mode == "abs":
+                    pass
+                else:
+                    threshold_line = 20.0
+
+        zero_pen = pg.mkPen(color='#7f8c8d', width=1, style=Qt.SolidLine)
+        self.deviation_plot.plot(
+            np.array([0.0, 1.0]), np.array([0.0, 0.0]),
+            pen=zero_pen, name="零线"
+        )
+        view_range = self.deviation_plot.viewRange()
+        if view_range and view_range[0]:
+            x_max = max(view_range[0][1], np.max(times_arr) if len(times_arr) else 200.0)
+            self.deviation_plot.plot(
+                np.array([0.0, x_max]), np.array([0.0, 0.0]),
+                pen=zero_pen, name=None
+            )
+
+        if mode == "pct" and threshold_line:
+            th_pen = pg.mkPen(color='#e74c3c', width=1, style=Qt.DashLine)
+            self.deviation_plot.plot(
+                np.array([0.0, x_max if 'x_max' in locals() else 200.0]),
+                np.array([threshold_line, threshold_line]),
+                pen=th_pen, name="+阈值(20%)"
+            )
+            self.deviation_plot.plot(
+                np.array([0.0, x_max if 'x_max' in locals() else 200.0]),
+                np.array([-threshold_line, -threshold_line]),
+                pen=th_pen, name="-阈值(20%)"
+            )
 
     def refresh_samples(self):
         current_selected = self._selected_ids
@@ -1124,6 +1441,298 @@ class CsvImportTab(QWidget):
             self._load_failures()
 
 
+class BaselineTemplateTableModel(QAbstractTableModel):
+    HEADERS = ["纸型", "基线试样", "基线点数", "平均斜率", "平均半径", "平均毛糙", "异常率%", "备注", "更新时间"]
+
+    def __init__(self, data: Optional[List] = None):
+        super().__init__()
+        self._data = data or []
+
+    def update_data(self, data: List):
+        self.beginResetModel()
+        self._data = data
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self._data)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self.HEADERS)
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return self.HEADERS[section]
+        return None
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid() or index.row() >= len(self._data):
+            return None
+        row = self._data[index.row()]
+        col = index.column()
+        if role == Qt.DisplayRole:
+            if col == 0:
+                return row["paper_type"]
+            elif col == 1:
+                return row.get("sample_no", "-") or "-"
+            elif col == 2:
+                return str(row.get("point_count", 0))
+            elif col == 3:
+                return f"{row['avg_slope']:.4f}" if row["avg_slope"] is not None else "-"
+            elif col == 4:
+                return f"{row['avg_radius']:.2f}" if row["avg_radius"] is not None else "-"
+            elif col == 5:
+                return f"{row['avg_roughness']:.2f}" if row["avg_roughness"] is not None else "-"
+            elif col == 6:
+                anomaly_rate = row.get("anomaly_rate_pct")
+                return f"{anomaly_rate:.1f}%" if anomaly_rate is not None else "-"
+            elif col == 7:
+                return row["remark"] if row["remark"] else "-"
+            elif col == 8:
+                return row["updated_at"]
+        if role == Qt.ForegroundRole and col == 6:
+            anomaly_rate = row.get("anomaly_rate_pct")
+            if anomaly_rate is not None:
+                if anomaly_rate >= 30:
+                    return QColor("#c0392b")
+                elif anomaly_rate >= 15:
+                    return QColor("#e67e22")
+                elif anomaly_rate >= 5:
+                    return QColor("#f1c40f")
+        return None
+
+
+class PaperRiskTableModel(QAbstractTableModel):
+    HEADERS = ["纸张类型", "试样总数", "高风险", "中风险", "低风险", "正常", "异常率%", "基线试样数"]
+
+    def __init__(self, data: Optional[List] = None):
+        super().__init__()
+        self._data = data or []
+
+    def update_data(self, data: List):
+        self.beginResetModel()
+        self._data = data
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self._data)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self.HEADERS)
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return self.HEADERS[section]
+        return None
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid() or index.row() >= len(self._data):
+            return None
+        row = self._data[index.row()]
+        col = index.column()
+        if role == Qt.DisplayRole:
+            if col == 0:
+                return row["paper_type"]
+            elif col == 1:
+                return str(row["total_samples"])
+            elif col == 2:
+                return str(row["high_risk"])
+            elif col == 3:
+                return str(row["mid_risk"])
+            elif col == 4:
+                return str(row["low_risk"])
+            elif col == 5:
+                return str(row["normal"])
+            elif col == 6:
+                rate = row.get("anomaly_rate_pct")
+                return f"{rate:.1f}%" if rate is not None else "-"
+            elif col == 7:
+                return str(row.get("baseline_count", 0))
+        if role == Qt.ForegroundRole and col == 6:
+            rate = row.get("anomaly_rate_pct")
+            if rate is not None:
+                if rate >= 40:
+                    return QColor("#c0392b")
+                elif rate >= 20:
+                    return QColor("#e67e22")
+                elif rate >= 5:
+                    return QColor("#f1c40f")
+                else:
+                    return QColor("#27ae60")
+        if role == Qt.ForegroundRole and col in (2, 3, 4):
+            val = row[self.HEADERS[col].replace("风险", "_risk").lower()] if False else 0
+            if col == 2 and row["high_risk"] > 0:
+                return QColor("#c0392b")
+            if col == 3 and row["mid_risk"] > 0:
+                return QColor("#e67e22")
+            if col == 4 and row["low_risk"] > 0:
+                return QColor("#f1c40f")
+        return None
+
+
+class BaselineTemplateTab(QWidget):
+    data_updated = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self._init_ui()
+        self._load_templates()
+
+    def _init_ui(self):
+        main_layout = QVBoxLayout(self)
+
+        hint_group = QGroupBox("纸型基线模板说明")
+        hint_layout = QVBoxLayout(hint_group)
+        hint = QLabel(
+            "• 每个纸张类型可建立一个基线模板，用于同纸型试样的对照分析\n"
+            "• 基线来源：在「试样管理」中选择典型试样，点击「★ 设为纸型基线」\n"
+            "• 新增试样时自动匹配同纸型的基线模板，测量数据录入后自动进行偏差分析\n"
+            "• 异常判断将增加「偏离纸型基线」作为原因之一"
+        )
+        hint.setStyleSheet("color: #555; font-size: 12px; padding: 4px;")
+        hint_layout.addWidget(hint)
+        main_layout.addWidget(hint_group)
+
+        list_group = QGroupBox("基线模板列表（按纸型）")
+        list_layout = QVBoxLayout(list_group)
+
+        self.template_table = QTableView()
+        self.template_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.template_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.template_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.template_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.template_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+
+        self.template_model = BaselineTemplateTableModel()
+        self.template_table.setModel(self.template_model)
+        list_layout.addWidget(self.template_table, 1)
+
+        btn_row = QHBoxLayout()
+        self.refresh_btn = QPushButton("刷新列表")
+        self.refresh_btn.clicked.connect(self._load_templates)
+        self.rebuild_btn = QPushButton("重建选中纸型基线")
+        self.rebuild_btn.clicked.connect(self._rebuild_selected)
+        self.delete_btn = QPushButton("删除选中基线模板")
+        self.delete_btn.clicked.connect(self._delete_selected)
+        self.rebuild_all_btn = QPushButton("重建所有基线（聚合基线试样）")
+        self.rebuild_all_btn.clicked.connect(self._rebuild_all)
+        btn_row.addWidget(self.refresh_btn)
+        btn_row.addWidget(self.rebuild_btn)
+        btn_row.addWidget(self.delete_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(self.rebuild_all_btn)
+        list_layout.addLayout(btn_row)
+
+        main_layout.addWidget(list_group, 1)
+
+        stats_group = QGroupBox("各纸型异常率统计（用于快速发现风险纸型）")
+        stats_layout = QVBoxLayout(stats_group)
+        self.paper_risk_table = QTableView()
+        self.paper_risk_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.paper_risk_model = PaperRiskTableModel()
+        self.paper_risk_table.setModel(self.paper_risk_model)
+        stats_layout.addWidget(self.paper_risk_table)
+
+        btn_row2 = QHBoxLayout()
+        self.refresh_risk_btn = QPushButton("刷新统计")
+        self.refresh_risk_btn.clicked.connect(self._load_risk_stats)
+        btn_row2.addWidget(self.refresh_risk_btn)
+        btn_row2.addStretch()
+        stats_layout.addLayout(btn_row2)
+
+        main_layout.addWidget(stats_group, 1)
+
+    def _load_templates(self):
+        templates = db.get_all_baseline_templates()
+        rows = []
+        for t in templates:
+            d = dict(t)
+            bl = anomaly_detection.get_paper_type_baseline(t["paper_type"])
+            d["point_count"] = len(bl.times) if bl else 0
+            samples = db.get_samples_by_paper_type(t["paper_type"])
+            ids = [s["id"] for s in samples]
+            if ids:
+                anom = sum(1 for s in samples if s["risk_flag"] != "正常")
+                d["anomaly_rate_pct"] = round(anom / len(samples) * 100, 1) if samples else 0.0
+            else:
+                d["anomaly_rate_pct"] = None
+            rows.append(d)
+        self.template_model.update_data(rows)
+        self._load_risk_stats()
+
+    def _load_risk_stats(self):
+        stats = db.get_paper_type_risk_summary()
+        self.paper_risk_model.update_data(stats)
+
+    def _get_selected_template(self):
+        idx = self.template_table.currentIndex()
+        if not idx.isValid():
+            return None
+        return self.template_model._data[idx.row()]
+
+    def _rebuild_selected(self):
+        t = self._get_selected_template()
+        if not t:
+            QMessageBox.information(self, "提示", "请先选择一个基线模板")
+            return
+        paper_type = t["paper_type"]
+        baselines = db.get_baselines_by_paper_type(paper_type)
+        if not baselines:
+            QMessageBox.warning(self, "失败", f"纸型「{paper_type}」下没有标记为基线的试样，请先在试样管理中标记")
+            return
+        main_bl = baselines[0]
+        try:
+            bl = anomaly_detection.build_baseline_from_sample(main_bl["id"])
+            if bl:
+                QMessageBox.information(self, "成功", f"已重建「{paper_type}」基线模板（来源试样：{main_bl['sample_no']}）")
+                self._load_templates()
+                self.data_updated.emit()
+            else:
+                QMessageBox.warning(self, "失败", "重建失败，请检查测量数据")
+        except Exception as e:
+            QMessageBox.warning(self, "失败", str(e))
+
+    def _delete_selected(self):
+        t = self._get_selected_template()
+        if not t:
+            QMessageBox.information(self, "提示", "请先选择一个基线模板")
+            return
+        paper_type = t["paper_type"]
+        reply = QMessageBox.question(
+            self, "确认",
+            f"确定要删除「{paper_type}」的基线模板吗？\n（不会删除试样及其基线标记，仅删除模板数据）",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            db.delete_baseline_template(t["id"])
+            QMessageBox.information(self, "成功", f"已删除「{paper_type}」基线模板")
+            self._load_templates()
+            self.data_updated.emit()
+        except Exception as e:
+            QMessageBox.warning(self, "失败", str(e))
+
+    def _rebuild_all(self):
+        paper_types = db.get_all_paper_types()
+        rebuilt = 0
+        failed = 0
+        for pt in paper_types:
+            baselines = db.get_baselines_by_paper_type(pt)
+            if not baselines:
+                continue
+            try:
+                bl = anomaly_detection.build_baseline_from_sample(baselines[0]["id"])
+                if bl:
+                    rebuilt += 1
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+        self._load_templates()
+        self.data_updated.emit()
+        QMessageBox.information(self, "完成", f"重建完成：成功 {rebuilt} 个，失败 {failed} 个")
+
+
 class BatchTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -1154,6 +1763,8 @@ class BatchTab(QWidget):
 
         main_layout.addWidget(form_group)
 
+        center_splitter = QSplitter(Qt.Vertical)
+
         list_group = QGroupBox("批次列表")
         list_layout = QVBoxLayout(list_group)
 
@@ -1177,19 +1788,69 @@ class BatchTab(QWidget):
         btn_row2.addWidget(reassess_btn)
         list_layout.addLayout(btn_row2)
 
-        main_layout.addWidget(list_group, 1)
+        center_splitter.addWidget(list_group)
 
-        detail_group = QGroupBox("批次详情")
-        detail_layout = QVBoxLayout(detail_group)
+        detail_group = QGroupBox("批次详情 & 按纸型聚合")
+        detail_container = QWidget()
+        detail_splitter = QSplitter(Qt.Horizontal, detail_container)
+
+        left_detail = QWidget()
+        left_layout = QVBoxLayout(left_detail)
+        left_layout.setContentsMargins(0, 0, 0, 0)
         self.detail_text = QTextEdit()
         self.detail_text.setReadOnly(True)
-        self.detail_text.setMaximumHeight(180)
-        detail_layout.addWidget(self.detail_text)
-        main_layout.addWidget(detail_group)
+        left_layout.addWidget(QLabel("批次详情："))
+        left_layout.addWidget(self.detail_text, 1)
+
+        right_detail = QWidget()
+        right_layout = QVBoxLayout(right_detail)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(QLabel("按纸型聚合风险统计（选中批次）："))
+        self.paper_agg_table = QTableView()
+        self.paper_agg_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.paper_agg_model = PaperRiskTableModel()
+        self.paper_agg_table.setModel(self.paper_agg_model)
+        right_layout.addWidget(self.paper_agg_table, 1)
+
+        refresh_agg_btn = QPushButton("刷新聚合统计")
+        refresh_agg_btn.clicked.connect(self._refresh_aggregation)
+        right_layout.addWidget(refresh_agg_btn)
+
+        detail_splitter.addWidget(left_detail)
+        detail_splitter.addWidget(right_detail)
+        detail_splitter.setStretchFactor(0, 1)
+        detail_splitter.setStretchFactor(1, 1)
+
+        inner_layout = QVBoxLayout(detail_group)
+        inner_layout.addWidget(detail_container)
+
+        center_splitter.addWidget(detail_group)
+        center_splitter.setStretchFactor(0, 1)
+        center_splitter.setStretchFactor(1, 1)
+
+        main_layout.addWidget(center_splitter, 1)
+
+        global_agg_group = QGroupBox("全局按纸型聚合风险统计（所有批次）")
+        global_agg_layout = QVBoxLayout(global_agg_group)
+        self.global_paper_agg_table = QTableView()
+        self.global_paper_agg_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.global_paper_agg_model = PaperRiskTableModel()
+        self.global_paper_agg_table.setModel(self.global_paper_agg_model)
+        global_agg_layout.addWidget(self.global_paper_agg_table, 1)
+
+        global_btn_row = QHBoxLayout()
+        refresh_global_btn = QPushButton("刷新全局统计")
+        refresh_global_btn.clicked.connect(self._refresh_global_aggregation)
+        global_btn_row.addWidget(refresh_global_btn)
+        global_btn_row.addStretch()
+        global_agg_layout.addWidget(global_btn_row)
+
+        main_layout.addWidget(global_agg_group, 1)
 
     def _load_batches(self):
         batches = db.get_all_batches()
         self.batch_model.update_data(batches)
+        self._refresh_global_aggregation()
 
     def _create_batch(self):
         batch_code = self.batch_code_edit.text().strip()
@@ -1213,13 +1874,19 @@ class BatchTab(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "创建失败", str(e))
 
-    def _on_batch_selected(self):
+    def _get_selected_batch(self):
         idx = self.batch_table.currentIndex()
         if not idx.isValid():
+            return None
+        return self.batch_model._data[idx.row()]
+
+    def _on_batch_selected(self):
+        row = self._get_selected_batch()
+        if not row:
             self.detail_text.setPlainText("")
+            self.paper_agg_model.update_data([])
             return
 
-        row = self.batch_model._data[idx.row()]
         batch_id = row["id"]
 
         samples = db.get_samples_by_batch(batch_id)
@@ -1248,17 +1915,32 @@ class BatchTab(QWidget):
             for s in samples:
                 judge = s["judgment"] if s["judgment"] else "未分析"
                 risk = s["risk_flag"]
-                detail_lines.append(f"  • {s['sample_no']} - {s['paper_type']} | {judge} | {risk}")
+                baseline_mark = " ★基线" if s.get("is_baseline", 0) else ""
+                detail_lines.append(f"  • {s['sample_no']} - {s['paper_type']}{baseline_mark} | {judge} | {risk}")
 
         self.detail_text.setPlainText("\n".join(detail_lines))
 
+        agg = db.get_risk_aggregated_by_paper(batch_id)
+        for a in agg:
+            total = a.get("total_samples", 0)
+            anom = a.get("high_risk", 0) + a.get("mid_risk", 0) + a.get("low_risk", 0)
+            a["anomaly_rate_pct"] = round(anom / total * 100, 1) if total > 0 else 0.0
+        agg.sort(key=lambda x: x.get("anomaly_rate_pct", 0), reverse=True)
+        self.paper_agg_model.update_data(agg)
+
+    def _refresh_aggregation(self):
+        self._on_batch_selected()
+
+    def _refresh_global_aggregation(self):
+        stats = db.get_paper_type_risk_summary()
+        self.global_paper_agg_model.update_data(stats)
+
     def _reassess_batch(self):
-        idx = self.batch_table.currentIndex()
-        if not idx.isValid():
+        row = self._get_selected_batch()
+        if not row:
             QMessageBox.information(self, "提示", "请选择一个批次")
             return
 
-        row = self.batch_model._data[idx.row()]
         batch_id = row["id"]
 
         samples = db.get_samples_by_batch(batch_id)
@@ -1268,6 +1950,7 @@ class BatchTab(QWidget):
         risk_level, consecutive = anomaly_detection.update_batch_risk_by_anomalies(batch_id)
 
         self._load_batches()
+        self._on_batch_selected()
         QMessageBox.information(
             self, "评估完成",
             f"批次 '{row['batch_code']}' 重新评估完成\n风险等级: {risk_level}\n连续异常: {consecutive} 点"
@@ -1291,26 +1974,36 @@ class MainWindow(QMainWindow):
         self.sample_tab = SampleManagementTab()
         self.measurement_tab = MeasurementTab()
         self.comparison_tab = ComparisonTab()
+        self.baseline_tab = BaselineTemplateTab()
         self.csv_tab = CsvImportTab()
         self.batch_tab = BatchTab()
 
         self.tabs.addTab(self.sample_tab, "试样管理")
         self.tabs.addTab(self.measurement_tab, "测量录入")
         self.tabs.addTab(self.comparison_tab, "渗化曲线对比")
+        self.tabs.addTab(self.baseline_tab, "纸型基线模板")
         self.tabs.addTab(self.csv_tab, "CSV 导入")
-        self.tabs.addTab(self.batch_tab, "批次管理")
+        self.tabs.addTab(self.batch_tab, "批次&纸型风险")
 
         self.sample_tab.data_updated.connect(self.measurement_tab.refresh_samples)
         self.sample_tab.data_updated.connect(self.comparison_tab.refresh_samples)
+        self.sample_tab.data_updated.connect(self.baseline_tab._load_templates)
         self.sample_tab.data_updated.connect(self.batch_tab._load_batches)
 
         self.measurement_tab.data_updated.connect(self.sample_tab._load_samples)
         self.measurement_tab.data_updated.connect(self.comparison_tab.refresh_samples)
+        self.measurement_tab.data_updated.connect(self.baseline_tab._load_templates)
         self.measurement_tab.data_updated.connect(self.batch_tab._load_batches)
+
+        self.baseline_tab.data_updated.connect(self.sample_tab._load_samples)
+        self.baseline_tab.data_updated.connect(self.measurement_tab.refresh_samples)
+        self.baseline_tab.data_updated.connect(self.comparison_tab.refresh_samples)
+        self.baseline_tab.data_updated.connect(self.batch_tab._load_batches)
 
         self.csv_tab.data_updated.connect(self.sample_tab._load_samples)
         self.csv_tab.data_updated.connect(self.measurement_tab.refresh_samples)
         self.csv_tab.data_updated.connect(self.comparison_tab.refresh_samples)
+        self.csv_tab.data_updated.connect(self.baseline_tab._load_templates)
         self.csv_tab.data_updated.connect(self.batch_tab._load_batches)
 
         self.status_bar = QStatusBar()

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 import db
 import models
+import anomaly_detection
 
 
 SAMPLE_COLUMN_ALIASES = {
@@ -12,6 +13,7 @@ SAMPLE_COLUMN_ALIASES = {
     "paper_type": ["纸张类型", "纸型", "paper_type", "paper", "papertype"],
     "ink_date": ["点墨日期", "日期", "ink_date", "date", "inkdate"],
     "batch_code": ["批次号", "批次", "batch_code", "batch", "batchcode"],
+    "is_baseline": ["是否基线", "基线标记", "基线", "is_baseline", "baseline", "isbaseline"],
 }
 
 MEASUREMENT_COLUMN_ALIASES = {
@@ -81,6 +83,15 @@ def _detect_file_mode(headers: List[str]) -> str:
         return "sample"
 
 
+def _parse_is_baseline(raw: str) -> int:
+    if not raw:
+        return 0
+    r = raw.strip().lower()
+    if r in ("1", "true", "yes", "y", "是", "基线", "标记"):
+        return 1
+    return 0
+
+
 def import_csv(file_path: str) -> ImportSummary:
     summary = ImportSummary(source_file=os.path.basename(file_path))
 
@@ -115,6 +126,7 @@ def import_csv(file_path: str) -> ImportSummary:
     if mode in ("sample", "mixed"):
         sample_cols = _detect_columns(headers, SAMPLE_COLUMN_ALIASES)
         sample_cache: Dict[str, int] = {}
+        baseline_sample_ids_created: List[int] = []
         for i, row in enumerate(data_rows, start=2):
             sample_no = _get_value(row, sample_cols.get("sample_no"))
             if not sample_no:
@@ -137,7 +149,9 @@ def import_csv(file_path: str) -> ImportSummary:
             paper_type = _get_value(row, sample_cols.get("paper_type"))
             ink_date_raw = _get_value(row, sample_cols.get("ink_date"))
             batch_code_raw = _get_value(row, sample_cols.get("batch_code"))
+            is_baseline_raw = _get_value(row, sample_cols.get("is_baseline"))
             ink_date = models.normalize_ink_date(ink_date_raw) if ink_date_raw else ""
+            is_baseline = _parse_is_baseline(is_baseline_raw)
 
             sd = models.SampleData(
                 sample_no=sample_no,
@@ -165,9 +179,14 @@ def import_csv(file_path: str) -> ImportSummary:
                         batch_id = None
 
             try:
-                sid = db.create_sample(sd.sample_no.strip(), sd.paper_type.strip(), sd.ink_date, batch_id)
+                sid = db.create_sample(
+                    sd.sample_no.strip(), sd.paper_type.strip(), sd.ink_date, batch_id,
+                    is_baseline=is_baseline
+                )
                 sample_cache[sample_no] = sid
                 summary.samples_created += 1
+                if is_baseline:
+                    baseline_sample_ids_created.append(sid)
             except Exception as e:
                 raw = ",".join(row)
                 reason = f"数据库写入失败: {e}"
@@ -261,5 +280,17 @@ def import_csv(file_path: str) -> ImportSummary:
         f"测量: 新增 {summary.measurements_created}，跳过 {summary.measurements_skipped}"
     )
     summary.messages.append(f"失败记录: {summary.failures}")
+
+    if baseline_sample_ids_created:
+        built = 0
+        for sid in baseline_sample_ids_created:
+            try:
+                bl = anomaly_detection.build_baseline_from_sample(sid)
+                if bl:
+                    built += 1
+            except Exception:
+                pass
+        if built > 0:
+            summary.messages.append(f"基线模板: 成功构建 {built} 个纸型基线")
 
     return summary

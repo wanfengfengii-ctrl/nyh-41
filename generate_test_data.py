@@ -54,15 +54,20 @@ def generate_measurements(sample_no: str, base_slope: float = 0.6,
     return measurements
 
 
-def generate_sample_csv(file_path: str, num_samples: int = 6):
+def generate_sample_csv(file_path: str, num_samples: int = 6, mark_baselines: bool = True):
     samples = generate_samples(num_samples)
     os.makedirs(os.path.dirname(file_path) if os.path.dirname(file_path) else ".", exist_ok=True)
 
     with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["试样编号", "纸张类型", "点墨日期", "批次号"])
+        writer.writerow(["试样编号", "纸张类型", "点墨日期", "批次号", "是否基线"])
+        seen_papers = set()
         for s in samples:
-            writer.writerow([s["sample_no"], s["paper_type"], s["ink_date"], s["batch_code"]])
+            is_baseline = ""
+            if mark_baselines and s["paper_type"] not in seen_papers:
+                is_baseline = "是"
+                seen_papers.add(s["paper_type"])
+            writer.writerow([s["sample_no"], s["paper_type"], s["ink_date"], s["batch_code"], is_baseline])
 
     print(f"试样 CSV 已生成: {file_path} ({len(samples)} 条)")
     return samples
@@ -102,7 +107,7 @@ def generate_measurement_csv(file_path: str, samples: list,
     return all_meas
 
 
-def generate_mixed_csv(file_path: str, num_samples: int = 4):
+def generate_mixed_csv(file_path: str, num_samples: int = 4, mark_baselines: bool = True):
     samples = generate_samples(num_samples, seed=123)
     all_rows = []
 
@@ -113,6 +118,7 @@ def generate_mixed_csv(file_path: str, num_samples: int = 4):
         {"base_slope": 0.4, "base_radius": 1.4, "base_roughness": 1.8},
     ]
 
+    seen_papers = set()
     for i, s in enumerate(samples):
         profile = profiles[i % len(profiles)]
         meas = generate_measurements(
@@ -122,25 +128,31 @@ def generate_mixed_csv(file_path: str, num_samples: int = 4):
             base_roughness=profile["base_roughness"],
             num_points=8,
         )
+        is_baseline = ""
+        if mark_baselines and s["paper_type"] not in seen_papers:
+            is_baseline = "1"
+            seen_papers.add(s["paper_type"])
         for m in meas:
             all_rows.append({
                 "sample_no": s["sample_no"],
                 "paper_type": s["paper_type"],
                 "ink_date": s["ink_date"],
                 "batch_code": s["batch_code"],
+                "is_baseline": is_baseline,
                 "adsorb_time": m["adsorb_time"],
                 "radius": m["radius"],
                 "roughness": m["roughness"],
             })
+            is_baseline = ""
 
     os.makedirs(os.path.dirname(file_path) if os.path.dirname(file_path) else ".", exist_ok=True)
     with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["试样编号", "纸张类型", "点墨日期", "批次号",
+        writer.writerow(["试样编号", "纸张类型", "点墨日期", "批次号", "是否基线",
                          "吸附时间(s)", "扩散半径(mm)", "边缘毛糙度"])
         for r in all_rows:
             writer.writerow([
-                r["sample_no"], r["paper_type"], r["ink_date"], r["batch_code"],
+                r["sample_no"], r["paper_type"], r["ink_date"], r["batch_code"], r["is_baseline"],
                 r["adsorb_time"], r["radius"], r["roughness"]
             ])
 
