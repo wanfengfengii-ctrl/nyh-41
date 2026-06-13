@@ -582,12 +582,163 @@ class MeasurementTab(QWidget):
         self.sample_combo.setCurrentIndex(0)
 
 
+class SampleDetailCard(QWidget):
+    def __init__(self, sample, color, measurements, judgment, parent=None):
+        super().__init__(parent)
+        self._sample = sample
+        self._color = color
+        self._measurements = measurements
+        self._judgment = judgment
+        self._init_ui()
+
+    def _risk_color(self, risk: str) -> str:
+        if risk == "高风险":
+            return "#c0392b"
+        elif risk == "中风险":
+            return "#e67e22"
+        elif risk == "低风险":
+            return "#f1c40f"
+        return "#27ae60"
+
+    def _init_ui(self):
+        import statistics
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        self.setStyleSheet(f"""
+            SampleDetailCard {{
+                border: 2px solid {self._color};
+                border-radius: 6px;
+                background-color: #fafafa;
+            }}
+        """)
+        self.setMinimumWidth(300)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        header = QHBoxLayout()
+        color_bar = QWidget()
+        color_bar.setFixedWidth(6)
+        color_bar.setStyleSheet(f"background-color: {self._color}; border-radius: 3px;")
+        header.addWidget(color_bar)
+
+        title_layout = QVBoxLayout()
+        title = QLabel(f"{self._sample['sample_no']}  ·  {self._sample['paper_type']}")
+        f = title.font()
+        f.setBold(True)
+        f.setPointSize(f.pointSize() + 1)
+        title.setFont(f)
+        title.setStyleSheet(f"color: {self._color};")
+
+        meta = QLabel(f"点墨日期: {self._sample['ink_date']}")
+        meta.setStyleSheet("color: #666; font-size: 11px;")
+        title_layout.addWidget(title)
+        title_layout.addWidget(meta)
+        header.addLayout(title_layout, 1)
+
+        risk_label = QLabel(self._judgment.risk_flag)
+        risk_label.setAlignment(Qt.AlignCenter)
+        risk_label.setFixedWidth(64)
+        risk_label.setStyleSheet(f"""
+            background-color: {self._risk_color(self._judgment.risk_flag)};
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 12px;
+        """)
+        header.addWidget(risk_label)
+        layout.addLayout(header)
+
+        plot = pg.PlotWidget()
+        plot.setMaximumHeight(180)
+        plot.setLabel('left', '半径(mm)')
+        plot.setLabel('bottom', '时间(s)')
+        plot.showGrid(x=True, y=True, alpha=0.3)
+        plot.setMouseEnabled(x=True, y=False)
+        plot.setBackground('#ffffff')
+
+        if self._measurements:
+            times_arr = np.array([float(m["adsorb_time"]) for m in self._measurements])
+            radii_arr = np.array([float(m["radius"]) for m in self._measurements])
+            sort_idx = np.argsort(times_arr)
+            times_arr = times_arr[sort_idx]
+            radii_arr = radii_arr[sort_idx]
+            ms_sorted = [self._measurements[i] for i in sort_idx]
+
+            plot.plot(times_arr, radii_arr, pen=pg.mkPen(color=self._color, width=2),
+                      symbol='o', symbolSize=6, symbolBrush=self._color, symbolPen=self._color)
+
+            anomaly_t = [float(m["adsorb_time"]) for m in ms_sorted if m["is_anomaly"]]
+            anomaly_r = [float(m["radius"]) for m in ms_sorted if m["is_anomaly"]]
+            if anomaly_t:
+                plot.plot(np.array(anomaly_t), np.array(anomaly_r),
+                          pen=None, symbol='x', symbolSize=14,
+                          symbolBrush=QColor("#c0392b"), symbolPen=QColor("#c0392b"))
+        else:
+            plot.setTitle("无测量数据")
+
+        layout.addWidget(plot)
+
+        if self._measurements:
+            times_list = [float(m["adsorb_time"]) for m in self._measurements]
+            radii_list = [float(m["radius"]) for m in self._measurements]
+            rough_list = [float(m["roughness"]) for m in self._measurements]
+            slope = anomaly_detection._fit_slope(times_list, radii_list)
+            avg_r = statistics.mean(radii_list)
+            max_r = max(radii_list)
+            avg_ro = statistics.mean(rough_list)
+            anom_cnt = sum(1 for m in self._measurements if m["is_anomaly"])
+
+            stats_layout = QHBoxLayout()
+            stats = [
+                ("渗化斜率", f"{slope:.3f}"),
+                ("平均半径", f"{avg_r:.2f}mm"),
+                ("最大半径", f"{max_r:.2f}mm"),
+                ("平均毛糙", f"{avg_ro:.2f}"),
+                (f"异常点", f"{anom_cnt}/{len(self._measurements)}"),
+            ]
+            for label, val in stats:
+                stat_box = QVBoxLayout()
+                lbl = QLabel(label)
+                lbl.setStyleSheet("color: #888; font-size: 10px;")
+                lbl.setAlignment(Qt.AlignCenter)
+                val_lbl = QLabel(val)
+                val_lbl.setAlignment(Qt.AlignCenter)
+                vf = val_lbl.font()
+                vf.setBold(True)
+                val_lbl.setFont(vf)
+                stat_box.addWidget(lbl)
+                stat_box.addWidget(val_lbl)
+                stats_layout.addLayout(stat_box)
+            layout.addLayout(stats_layout)
+
+        judge_box = QVBoxLayout()
+        judge_title = QLabel(f"判断: {self._judgment.judgment}")
+        jf = judge_title.font()
+        jf.setBold(True)
+        judge_title.setFont(jf)
+        judge_title.setStyleSheet(f"color: {self._risk_color(self._judgment.risk_flag)};")
+        judge_box.addWidget(judge_title)
+
+        for r in self._judgment.reasons[:4]:
+            reason_lbl = QLabel(f"  · {r}")
+            reason_lbl.setStyleSheet("color: #555; font-size: 11px;")
+            reason_lbl.setWordWrap(True)
+            judge_box.addWidget(reason_lbl)
+        layout.addLayout(judge_box)
+
+        layout.addStretch()
+
+
 class ComparisonTab(QWidget):
     def __init__(self):
         super().__init__()
         self._selected_ids: List[int] = []
         self._plot_curves = {}
         self._plot_scatters = {}
+        self._detail_cards = []
         self._init_ui()
         self._load_samples()
 
@@ -635,41 +786,65 @@ class ComparisonTab(QWidget):
         self.show_grid_cb.setChecked(True)
         self.show_grid_cb.stateChanged.connect(self._on_grid_changed)
 
+        self.show_details_cb = QCheckBox("显示并排明细")
+        self.show_details_cb.setChecked(True)
+        self.show_details_cb.stateChanged.connect(self._on_details_toggled)
+
         options_layout.addWidget(self.show_anomaly_cb)
         options_layout.addWidget(self.show_legend_cb)
         options_layout.addWidget(self.show_grid_cb)
+        options_layout.addWidget(self.show_details_cb)
 
         left_layout.addWidget(options_group)
-
-        info_group = QGroupBox("选择信息")
-        info_layout = QVBoxLayout(info_group)
-        self.info_text = QTextEdit()
-        self.info_text.setReadOnly(True)
-        self.info_text.setMaximumHeight(200)
-        info_layout.addWidget(self.info_text)
-        left_layout.addWidget(info_group)
-
         left_layout.addStretch()
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.right_splitter = QSplitter(Qt.Vertical)
+
+        merge_group = QGroupBox("合并渗化曲线")
+        merge_layout = QVBoxLayout(merge_group)
 
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setLabel('left', '扩散半径', units='mm')
         self.plot_widget.setLabel('bottom', '吸附时间', units='s')
-        self.plot_widget.setTitle("渗化曲线对比")
+        self.plot_widget.setTitle("多试样渗化曲线对比")
         self.plot_widget.showGrid(x=True, y=True)
         self.plot_widget.setMouseEnabled(x=True, y=True)
 
         if self.show_legend_cb.isChecked():
             self.plot_widget.addLegend()
 
-        right_layout.addWidget(self.plot_widget, 1)
+        merge_layout.addWidget(self.plot_widget)
+        self.right_splitter.addWidget(merge_group)
+
+        self.detail_group = QGroupBox("试样并排明细")
+        detail_layout = QVBoxLayout(self.detail_group)
+
+        self.detail_scroll = QScrollArea()
+        self.detail_scroll.setWidgetResizable(True)
+        self.detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.detail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        self.detail_container = QWidget()
+        self.detail_scroll_layout = QHBoxLayout(self.detail_container)
+        self.detail_scroll_layout.setSpacing(8)
+        self.detail_scroll_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.detail_scroll.setWidget(self.detail_container)
+        detail_layout.addWidget(self.detail_scroll)
+
+        self.right_splitter.addWidget(self.detail_group)
+        self.right_splitter.setStretchFactor(0, 3)
+        self.right_splitter.setStretchFactor(1, 2)
+
+        right_layout.addWidget(self.right_splitter)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
-        splitter.setStretchFactor(1, 4)
+        splitter.setStretchFactor(1, 5)
         main_layout.addWidget(splitter)
 
     def _load_samples(self):
@@ -677,6 +852,7 @@ class ComparisonTab(QWidget):
         self._plot_curves.clear()
         self._plot_scatters.clear()
         self.plot_widget.clear()
+        self._clear_detail_cards()
 
         samples = db.get_all_samples()
         self._all_samples = {s["id"]: s for s in samples}
@@ -693,43 +869,56 @@ class ComparisonTab(QWidget):
             self.sample_list.addItem(item)
             self._plot_curves[s["id"]] = color
 
+    def _clear_detail_cards(self):
+        while self.detail_scroll_layout.count():
+            item = self.detail_scroll_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        self._detail_cards = []
+
     def _on_selection_changed(self):
         self._selected_ids = []
         for item in self.sample_list.selectedItems():
             sid = item.data(Qt.UserRole)
             self._selected_ids.append(sid)
         self._update_plot()
-        self._update_info()
+        self._update_details()
 
-    def _update_info(self):
+    def _on_grid_changed(self):
+        show = self.show_grid_cb.isChecked()
+        self.plot_widget.showGrid(x=show, y=show)
+
+    def _on_details_toggled(self):
+        self.detail_group.setVisible(self.show_details_cb.isChecked())
+
+    def _update_details(self):
+        self._clear_detail_cards()
         if not self._selected_ids:
-            self.info_text.setPlainText("请从左侧选择要对比的试样")
+            hint = QLabel("请从左侧选择要对比的试样")
+            hint.setAlignment(Qt.AlignCenter)
+            hint.setStyleSheet("color: #888; padding: 30px;")
+            self.detail_scroll_layout.addWidget(hint)
             return
 
-        lines = []
-        all_samples = db.get_all_samples()
-        ref_ids = [s["id"] for s in all_samples if s["id"] not in self._selected_ids]
+        all_measurements = db.get_measurements_by_samples(self._selected_ids)
 
         for sid in self._selected_ids:
             sample = self._all_samples.get(sid)
             if not sample:
                 continue
 
-            j = anomaly_detection.judge_sample(sid, ref_ids if ref_ids else self._selected_ids)
-            lines.append(f"■ {sample['sample_no']}")
-            lines.append(f"  纸张: {sample['paper_type']}")
-            lines.append(f"  判断: {j.judgment}")
-            lines.append(f"  风险: {j.risk_flag}")
-            lines.append(f"  原因:")
-            for r in j.reasons[:3]:
-                lines.append(f"    • {r}")
-            lines.append("")
+            measurements = all_measurements.get(sid, [])
+            peer_refs = [s for s in self._selected_ids if s != sid]
+            judgment = anomaly_detection.judge_sample(sid, peer_refs if peer_refs else None)
 
-        self.info_text.setPlainText("\n".join(lines))
+            color = self._plot_curves.get(sid, "#3498db")
+            card = SampleDetailCard(sample, color, measurements, judgment)
+            self.detail_scroll_layout.addWidget(card)
+            self._detail_cards.append(card)
 
-    def _on_grid_changed(self):
-        show = self.show_grid_cb.isChecked()
-        self.plot_widget.showGrid(x=show, y=show)
+        self.detail_scroll_layout.addStretch()
 
     def _update_plot(self):
         self.plot_widget.clear()

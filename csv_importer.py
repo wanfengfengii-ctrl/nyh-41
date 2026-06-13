@@ -189,31 +189,64 @@ def import_csv(file_path: str) -> ImportSummary:
 
             if adsorb_time_raw == "" and radius_raw == "" and roughness_raw == "":
                 continue
-
-            md = models.MeasurementData(
-                sample_no=sample_no,
-                adsorb_time=adsorb_time_raw,
-                radius=radius_raw,
-                roughness=roughness_raw,
-            )
-            vr, sample_id = models.validate_measurement(md, sample_id_cache)
-            if not vr:
+            if not sample_no:
+                if mode == "mixed":
+                    continue
                 raw = ",".join(row)
-                reason = models.errors_to_text(vr.errors)
-                db.record_import_failure(summary.source_file, i, raw, reason)
+                db.record_import_failure(summary.source_file, i, raw, "试样编号为空")
+                summary.failures += 1
+                continue
+
+            if sample_id_cache.get(sample_no) is None:
+                existing = db.get_sample_by_no(sample_no)
+                if existing:
+                    sample_id_cache[sample_no] = existing["id"]
+
+            sample_id = sample_id_cache.get(sample_no)
+            if sample_id is None:
+                raw = ",".join(row)
+                db.record_import_failure(summary.source_file, i, raw,
+                                         f"试样编号 '{sample_no}' 不存在")
                 summary.failures += 1
                 continue
 
             try:
-                db.create_measurement(
-                    sample_id,
-                    float(md.adsorb_time),
-                    float(md.radius),
-                    float(md.roughness),
-                )
+                adsorb_time = float(adsorb_time_raw)
+                radius = float(radius_raw)
+                roughness = float(roughness_raw) if roughness_raw != "" else 0.0
+            except (ValueError, TypeError):
+                raw = ",".join(row)
+                db.record_import_failure(summary.source_file, i, raw,
+                                         "吸附时间/半径/毛糙度必须是数字")
+                summary.failures += 1
+                continue
+
+            if adsorb_time <= 0:
+                raw = ",".join(row)
+                db.record_import_failure(summary.source_file, i, raw,
+                                         f"吸附时间必须大于 0，当前值: {adsorb_time}")
+                summary.failures += 1
+                continue
+            if radius <= 0:
+                raw = ",".join(row)
+                db.record_import_failure(summary.source_file, i, raw,
+                                         f"扩散半径必须大于 0，当前值: {radius}")
+                summary.failures += 1
+                continue
+            if roughness < 0:
+                raw = ",".join(row)
+                db.record_import_failure(summary.source_file, i, raw,
+                                         f"边缘毛糙度不能为负，当前值: {roughness}")
+                summary.failures += 1
+                continue
+
+            if db.measurement_exists(sample_id, adsorb_time):
+                summary.measurements_skipped += 1
+                continue
+
+            try:
+                db.create_measurement(sample_id, adsorb_time, radius, roughness)
                 summary.measurements_created += 1
-                if sample_id not in sample_id_cache and sample_no:
-                    sample_id_cache[sample_no] = sample_id
             except Exception as e:
                 raw = ",".join(row)
                 reason = f"数据库写入失败: {e}"
