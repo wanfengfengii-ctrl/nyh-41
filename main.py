@@ -2462,12 +2462,12 @@ class RepairPrescriptionTab(QWidget):
             return
         m = prescription_engine.capture_post_metrics(sid)
         self._post_metrics_captured = m
-        radius_str = f"{m.get('pre_avg_radius'):.2f}mm" if m.get('pre_avg_radius') else "-"
-        rough_str = f"{m.get('pre_avg_roughness'):.2f}" if m.get('pre_avg_roughness') else "-"
-        slope_str = f"{m.get('pre_avg_slope'):.4f}" if m.get('pre_avg_slope') else "-"
+        radius_str = f"{m.get('post_avg_radius'):.2f}mm" if m.get('post_avg_radius') else "-"
+        rough_str = f"{m.get('post_avg_roughness'):.2f}" if m.get('post_avg_roughness') else "-"
+        slope_str = f"{m.get('post_avg_slope'):.4f}" if m.get('post_avg_slope') else "-"
         self.post_metrics_label.setText(
-            f"风险:{m.get('pre_risk_flag') or '-'} | "
-            f"异常率:{m.get('pre_anomaly_ratio', 0)*100:.1f}% | "
+            f"风险:{m.get('post_risk_flag') or '-'} | "
+            f"异常率:{m.get('post_anomaly_ratio', 0)*100:.1f}% | "
             f"斜率:{slope_str} | 半径:{radius_str} | 毛糙:{rough_str}"
         )
 
@@ -2502,15 +2502,15 @@ class RepairPrescriptionTab(QWidget):
                 anomaly_reduced=1 if self.anom_reduced_cb.isChecked() else 0,
                 paper_judgment_affected=1 if self.paper_affected_cb.isChecked() else 0,
                 pre_risk_flag=pre.get("pre_risk_flag"),
-                post_risk_flag=post.get("pre_risk_flag"),
+                post_risk_flag=post.get("post_risk_flag"),
                 pre_anomaly_ratio=pre.get("pre_anomaly_ratio", 0.0),
-                post_anomaly_ratio=post.get("pre_anomaly_ratio", 0.0),
+                post_anomaly_ratio=post.get("post_anomaly_ratio", 0.0),
                 pre_avg_slope=pre.get("pre_avg_slope"),
-                post_avg_slope=post.get("pre_avg_slope"),
+                post_avg_slope=post.get("post_avg_slope"),
                 pre_avg_radius=pre.get("pre_avg_radius"),
-                post_avg_radius=post.get("pre_avg_radius"),
+                post_avg_radius=post.get("post_avg_radius"),
                 pre_avg_roughness=pre.get("pre_avg_roughness"),
-                post_avg_roughness=post.get("pre_avg_roughness"),
+                post_avg_roughness=post.get("post_avg_roughness"),
                 effect_rating=rating,
                 operator=self.operator_edit.text().strip() or None,
                 remark=self.record_remark_edit.text().strip() or None,
@@ -2542,6 +2542,8 @@ class PrescriptionHistoryTab(QWidget):
         super().__init__()
         self._data_loaded = False
         self._selected_record = None
+        self._selected_prescription_id = None
+        self._all_records = []
         self._init_ui()
 
     def _init_ui(self):
@@ -2722,11 +2724,13 @@ class PrescriptionHistoryTab(QWidget):
     def _do_query(self):
         paper_type = self.paper_combo.currentData()
         batch_id = self.batch_combo.currentData()
+        sample_filter = self.sample_filter_edit.text().strip()
+
+        self._selected_prescription_id = None
 
         summary = prescription_engine.get_prescription_history_summary(
             paper_type=paper_type, batch_id=batch_id
         )
-        sample_filter = self.sample_filter_edit.text().strip()
         if sample_filter:
             summary = [s for s in summary if sample_filter.lower() in (s.get("sample_no") or "").lower()]
         self.presc_table_model.update_data(summary)
@@ -2734,8 +2738,14 @@ class PrescriptionHistoryTab(QWidget):
 
         records = db.get_all_experiment_records(paper_type=paper_type, batch_id=batch_id)
         record_list = [dict(r) for r in records]
+        self._all_records = record_list
         if sample_filter:
-            record_list = [r for r in record_list if sample_filter.lower() in (r.get("sample_no") or "").lower() or sample_filter.lower() in (r.get("retest_sample_no") or "").lower()]
+            record_list = [
+                r for r in record_list
+                if sample_filter.lower() in (r.get("orig_sample_no") or "").lower()
+                or sample_filter.lower() in (r.get("sample_no") or "").lower()
+                or sample_filter.lower() in (r.get("retest_sample_no") or "").lower()
+            ]
         self.record_table_model.update_data(record_list)
 
         self._update_stats(paper_type)
@@ -2802,8 +2812,26 @@ class PrescriptionHistoryTab(QWidget):
         src_idx = self.presc_filter_proxy.mapToSource(idx)
         row = self.presc_table_model._data[src_idx.row()]
         pid = row["id"]
-        records = db.get_experiment_records_by_prescription(pid)
-        self.record_table_model.update_data([dict(r) for r in records])
+        if self._selected_prescription_id == pid:
+            self._selected_prescription_id = None
+            self.presc_table.selectionModel().blockSignals(True)
+            self.presc_table.clearSelection()
+            self.presc_table.selectionModel().blockSignals(False)
+        else:
+            self._selected_prescription_id = pid
+        sample_filter = self.sample_filter_edit.text().strip()
+        record_list = list(self._all_records)
+        if sample_filter:
+            record_list = [
+                r for r in record_list
+                if sample_filter.lower() in (r.get("orig_sample_no") or "").lower()
+                or sample_filter.lower() in (r.get("sample_no") or "").lower()
+                or sample_filter.lower() in (r.get("retest_sample_no") or "").lower()
+            ]
+        if self._selected_prescription_id is not None:
+            record_list = [r for r in record_list if r.get("prescription_id") == self._selected_prescription_id]
+        self.record_table_model.update_data(record_list)
+        self._plot_risk_trend(record_list)
 
     def _on_record_selected(self):
         idx = self.record_table.currentIndex()

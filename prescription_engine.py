@@ -445,7 +445,14 @@ def capture_pre_metrics(sample_id: int) -> Dict[str, Any]:
 
 
 def capture_post_metrics(sample_id: int) -> Dict[str, Any]:
-    return capture_pre_metrics(sample_id)
+    pre = capture_pre_metrics(sample_id)
+    return {
+        "post_risk_flag": pre["pre_risk_flag"],
+        "post_anomaly_ratio": pre["pre_anomaly_ratio"],
+        "post_avg_slope": pre["pre_avg_slope"],
+        "post_avg_radius": pre["pre_avg_radius"],
+        "post_avg_roughness": pre["pre_avg_roughness"],
+    }
 
 
 def save_experiment_record(
@@ -486,15 +493,15 @@ def save_experiment_record(
         anomaly_reduced=1 if anomaly_reduced else 0,
         paper_judgment_affected=1 if paper_judgment_affected else 0,
         pre_risk_flag=pre_metrics.get("pre_risk_flag"),
-        post_risk_flag=post_metrics.get("pre_risk_flag"),
+        post_risk_flag=post_metrics.get("post_risk_flag"),
         pre_anomaly_ratio=pre_metrics.get("pre_anomaly_ratio", 0.0),
-        post_anomaly_ratio=post_metrics.get("pre_anomaly_ratio", 0.0),
+        post_anomaly_ratio=post_metrics.get("post_anomaly_ratio", 0.0),
         pre_avg_slope=pre_metrics.get("pre_avg_slope"),
-        post_avg_slope=post_metrics.get("pre_avg_slope"),
+        post_avg_slope=post_metrics.get("post_avg_slope"),
         pre_avg_radius=pre_metrics.get("pre_avg_radius"),
-        post_avg_radius=post_metrics.get("pre_avg_radius"),
+        post_avg_radius=post_metrics.get("post_avg_radius"),
         pre_avg_roughness=pre_metrics.get("pre_avg_roughness"),
-        post_avg_roughness=post_metrics.get("pre_avg_roughness"),
+        post_avg_roughness=post_metrics.get("post_avg_roughness"),
         effect_rating=effect_rating,
         operator=operator,
         remark=remark,

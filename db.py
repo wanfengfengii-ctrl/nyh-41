@@ -747,12 +747,14 @@ def get_all_experiment_records(
 ) -> List[sqlite3.Row]:
     with get_connection() as conn:
         sql = """
-            SELECT er.*, s.sample_no, rp.dilution_ratio, rp.ink_amount, rp.environment,
+            SELECT er.*, s.sample_no, s_orig.sample_no AS orig_sample_no,
+                   rp.dilution_ratio, rp.ink_amount, rp.environment,
                    rp.retest_time AS presc_retest_time, rp.observation_focus,
                    b.batch_code
             FROM experiment_records er
             LEFT JOIN samples s ON er.sample_id = s.id
             LEFT JOIN repair_prescriptions rp ON er.prescription_id = rp.id
+            LEFT JOIN samples s_orig ON rp.sample_id = s_orig.id
             LEFT JOIN batches b ON er.batch_id = b.id
             WHERE 1=1
         """
