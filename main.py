@@ -1860,9 +1860,9 @@ class BatchTab(QWidget):
         self.batch_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.batch_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.batch_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.batch_table.selectionModel().selectionChanged.connect(self._on_batch_selected)
         self.batch_model = BatchTableModel()
         self.batch_table.setModel(self.batch_model)
+        self.batch_table.selectionModel().selectionChanged.connect(self._on_batch_selected)
         list_layout.addWidget(self.batch_table, 1)
 
         btn_row2 = QHBoxLayout()
